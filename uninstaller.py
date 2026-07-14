@@ -19,6 +19,7 @@ region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 vector_index_name = "rag-project"
+neptune_graph_name = "rag-project"
 cloudfront_comment = "CloudFront-for-rag-project"
 oai_comment = f"OAI for {vector_index_name}"
 
@@ -32,7 +33,7 @@ bucket_name = f"storage-for-rag-project-{account_id}-{region}"
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
 secrets_client = boto3.client("secretsmanager", region_name=region)
-opensearch_client = boto3.client("opensearchserverless", region_name=region)
+neptune_graph_client = boto3.client("neptune-graph", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
 agentcore_control_client = boto3.client(
@@ -325,76 +326,78 @@ def prompt_yes_no(question: str, default: bool = False) -> bool:
     return response in ("y", "yes")
 
 
-def delete_opensearch_collection():
-    """Delete OpenSearch Serverless collection and policies."""
-    logger.info("[2/6] Deleting OpenSearch collection")
-    
-    try:
-        collection_name = vector_index_name
-        
-        # Get collection ID first
-        try:
-            collections = opensearch_client.list_collections()
-            collection_id = None
-            for collection in collections.get("collectionSummaries", []):
-                if collection["name"] == collection_name:
-                    collection_id = collection["id"]
-                    break
-            
-            if collection_id:
-                # Delete collection using ID
-                opensearch_client.delete_collection(id=collection_id)
-                logger.info(f"  ✓ Deleted collection: {collection_name} (ID: {collection_id})")
-                
-                # Wait for deletion
-                time.sleep(30)
-            else:
-                logger.info(f"  Collection {collection_name} not found")
-                
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                logger.warning(f"  Could not delete collection: {e}")
-        
-        # Delete data access policy (shared rag-project naming)
-        for data_policy_name in [
-            f"data-{vector_index_name}",
-            f"data-{project_name}",
-            "data-agent-plugins",
-        ]:
-            try:
-                opensearch_client.delete_access_policy(
-                    name=data_policy_name,
-                    type="data",
-                )
-                logger.info(f"  ✓ Deleted data access policy: {data_policy_name}")
-            except ClientError as e:
-                if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                    logger.warning(f"  Could not delete data access policy {data_policy_name}: {e}")
+def delete_neptune_analytics_graph():
+    """Delete Neptune Analytics graph used by GraphRAG Knowledge Base.
 
-        # Delete encryption/network policies (shared + legacy project-specific names)
-        policies = [
-            ("network", f"net-{vector_index_name}-{region}"),
-            ("encryption", f"enc-{vector_index_name}-{region}"),
-            ("network", f"net-{project_name}-{region}"),
-            ("encryption", f"enc-{project_name}-{region}"),
-            ("network", f"net-agent-plugins-{region}"),
-            ("encryption", f"enc-agent-plugins-{region}"),
-        ]
-        
-        for policy_type, policy_name in policies:
-            try:
-                opensearch_client.delete_security_policy(
-                    name=policy_name,
-                    type=policy_type
+    Delete Knowledge Base first (caller responsibility), then the graph,
+    otherwise Neptune may continue billing after KB deletion.
+    """
+    logger.info("[2/6] Deleting Neptune Analytics graph")
+
+    try:
+        graph_id = None
+        next_token = None
+        while True:
+            kwargs = {}
+            if next_token:
+                kwargs["nextToken"] = next_token
+            response = neptune_graph_client.list_graphs(**kwargs)
+            for graph in response.get("graphs", []):
+                if graph.get("name") == neptune_graph_name:
+                    graph_id = graph["id"]
+                    break
+            if graph_id:
+                break
+            next_token = response.get("nextToken")
+            if not next_token:
+                break
+
+        if not graph_id:
+            logger.info(f"  Neptune graph not found: {neptune_graph_name}")
+            return
+
+        try:
+            detail = neptune_graph_client.get_graph(graphIdentifier=graph_id)
+            if detail.get("deletionProtection"):
+                logger.info("  Disabling deletion protection on Neptune graph...")
+                neptune_graph_client.update_graph(
+                    graphIdentifier=graph_id,
+                    deletionProtection=False,
                 )
-                logger.info(f"  ✓ Deleted {policy_type} policy: {policy_name}")
+        except ClientError as e:
+            logger.warning(f"  Could not update deletion protection: {e}")
+
+        neptune_graph_client.delete_graph(
+            graphIdentifier=graph_id,
+            skipSnapshot=True,
+        )
+        logger.info(f"  ✓ Deleted Neptune graph: {neptune_graph_name} ({graph_id})")
+
+        # Wait briefly for deletion to start
+        for _ in range(12):
+            try:
+                status = neptune_graph_client.get_graph(graphIdentifier=graph_id).get("status")
+                if status == "DELETING":
+                    logger.info("  Neptune graph deletion in progress...")
+                time.sleep(10)
             except ClientError as e:
-                if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                    logger.warning(f"  Could not delete {policy_type} policy {policy_name}: {e}")
-        
-        logger.info("✓ OpenSearch collection deleted")
+                if e.response["Error"]["Code"] in (
+                    "ResourceNotFoundException",
+                    "GraphNotFoundException",
+                ):
+                    logger.info("  ✓ Neptune graph deletion confirmed")
+                    break
+                raise
+
+        logger.info("✓ Neptune Analytics graph deleted")
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("ResourceNotFoundException", "GraphNotFoundException"):
+            logger.info(f"  Neptune graph already deleted: {neptune_graph_name}")
+        else:
+            logger.error(f"Error deleting Neptune graph: {e}")
     except Exception as e:
-        logger.error(f"Error deleting OpenSearch collection: {e}")
+        logger.error(f"Error deleting Neptune graph: {e}")
+
 
 def _list_all_agentcore_gateways():
     gateways = []
@@ -588,7 +591,7 @@ def delete_iam_roles(
 def clear_config_json(
     delete_s3_bucket: bool = False,
     delete_cloudfront: bool = False,
-    delete_opensearch: bool = False,
+    delete_neptune: bool = False,
     delete_knowledge_base: bool = False,
 ):
     """Remove installer-managed fields from application/config.json."""
@@ -604,8 +607,15 @@ def clear_config_json(
     ]
     if delete_knowledge_base:
         installer_fields.extend(["knowledge_base_id", "knowledge_base_role"])
-    if delete_opensearch:
-        installer_fields.extend(["collectionArn", "opensearch_url"])
+    if delete_neptune:
+        installer_fields.extend([
+            "neptune_graph_id",
+            "neptune_graph_arn",
+            "neptune_graph_name",
+            # legacy OpenSearch keys (in case of partial migration)
+            "collectionArn",
+            "opensearch_url",
+        ])
     if delete_s3_bucket:
         installer_fields.extend(["s3_bucket", "s3_arn"])
     if delete_cloudfront:
@@ -641,7 +651,7 @@ def main():
     logger.info(f"Region: {region}")
     logger.info(f"Account ID: {account_id}")
     logger.info(f"S3 Bucket: {bucket_name}")
-    logger.info(f"OpenSearch collection: {vector_index_name}")
+    logger.info(f"Neptune graph: {neptune_graph_name}")
     logger.info(f"Knowledge Base: {knowledge_base_name}")
     logger.info("=" * 60)
 
@@ -652,7 +662,8 @@ def main():
     parser.add_argument("--delete-agentcore-gateway", action="store_true")
     parser.add_argument("--delete-s3-bucket", action="store_true")
     parser.add_argument("--delete-cloudfront", action="store_true")
-    parser.add_argument("--delete-opensearch", action="store_true")
+    parser.add_argument("--delete-neptune", action="store_true")
+    parser.add_argument("--delete-opensearch", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--delete-knowledge-base", action="store_true")
     args = parser.parse_args()
 
@@ -668,8 +679,10 @@ def main():
         print("Shared resources (prompted separately, default: keep):")
         print(f"  S3 bucket:        {bucket_name}")
         print(f"  CloudFront:       {cloudfront_comment}")
-        print(f"  OpenSearch:       {vector_index_name}")
+        print(f"  Neptune graph:    {neptune_graph_name}")
         print(f"  Knowledge Base:   {knowledge_base_name}")
+        print("=" * 60)
+        print("NOTE: Delete Knowledge Base before Neptune graph to avoid orphan billing.")
         print("=" * 60)
         response = input("\nProceed with project-specific resource deletion? (yes/no): ")
         if response.lower() != "yes":
@@ -685,7 +698,10 @@ def main():
 
     delete_s3_bucket = resolve(args.delete_s3_bucket, f"\nDelete shared S3 bucket ({bucket_name})?")
     delete_cloudfront = resolve(args.delete_cloudfront, f"Delete shared CloudFront distribution ({cloudfront_comment})?")
-    delete_opensearch = resolve(args.delete_opensearch, f"Delete shared OpenSearch collection ({vector_index_name})?")
+    delete_neptune = resolve(
+        args.delete_neptune or args.delete_opensearch,
+        f"Delete Neptune Analytics graph ({neptune_graph_name})?",
+    )
     delete_knowledge_base = resolve(args.delete_knowledge_base, f"Delete shared Knowledge Base ({knowledge_base_name})?")
 
     start_time = time.time()
@@ -695,10 +711,15 @@ def main():
         else:
             logger.info(f"[skip] Knowledge Base retained (shared resource): {knowledge_base_name}")
 
-        if delete_opensearch:
-            delete_opensearch_collection()
+        if delete_neptune:
+            if not delete_knowledge_base:
+                logger.warning(
+                    "Deleting Neptune while keeping Knowledge Base may leave the KB broken. "
+                    "Prefer deleting the Knowledge Base first."
+                )
+            delete_neptune_analytics_graph()
         else:
-            logger.info(f"[skip] OpenSearch collection retained (shared resource): {vector_index_name}")
+            logger.info(f"[skip] Neptune graph retained (shared resource): {neptune_graph_name}")
 
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
             skip_confirmation=args.delete_agentcore_gateway
@@ -711,7 +732,7 @@ def main():
         clear_config_json(
             delete_s3_bucket=delete_s3_bucket,
             delete_cloudfront=delete_cloudfront,
-            delete_opensearch=delete_opensearch,
+            delete_neptune=delete_neptune,
             delete_knowledge_base=delete_knowledge_base,
         )
 

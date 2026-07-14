@@ -18,7 +18,8 @@ try:
         name = "mcp-retrieve",
         instructions=(
             "You are a helpful assistant. "
-            "You retrieve documents in RAG."
+            "You retrieve documents using Bedrock Knowledge Base GraphRAG "
+            "(Amazon Neptune Analytics)."
         ),
     )
     logger.info("MCP server initialized successfully")
@@ -27,20 +28,19 @@ except Exception as e:
         logger.info(f"{err_msg}")
 
 ######################################
-# RAG
+# GraphRAG (Neptune Analytics)
 ######################################
 @mcp.tool()
 def retrieve(keyword: str) -> str:
     """
-    Query the keyword using RAG based on the knowledge base.
-    keyword: the keyword to query
-    return: the result of query
+    Query the knowledge base with GraphRAG (Neptune Analytics).
+    Uses vector search plus graph traversal over extracted entities/relations.
+    keyword: the keyword or natural-language query
+    return: JSON documents with contents and reference metadata
     """
-    logger.info(f"search --> keyword: {keyword}")
+    logger.info(f"GraphRAG search --> keyword: {keyword}")
 
     return mcp_retrieve.retrieve(keyword)
 
 if __name__ =="__main__":
     mcp.run(transport="stdio")
-
-

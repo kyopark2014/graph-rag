@@ -29,6 +29,7 @@ config = load_config()
 
 bedrock_region = config.get('region', 'us-west-2')
 projectName = config.get('projectName')
+knowledge_base_name = config.get('knowledge_base_name') or projectName
 knowledge_base_id = config.get('knowledge_base_id')
 number_of_results = 5
 
@@ -51,17 +52,44 @@ else:
     bedrock_agent_runtime_client = boto3.client(
         "bedrock-agent-runtime", region_name=bedrock_region)
 
+
+def _resolve_knowledge_base_id() -> str:
+    """Find Knowledge Base ID by configured name and persist it to config.json."""
+    global knowledge_base_id
+
+    bedrock_agent_client = boto3.client("bedrock-agent", region_name=bedrock_region)
+    knowledge_base_list = bedrock_agent_client.list_knowledge_bases()
+
+    for knowledge_base in knowledge_base_list.get("knowledgeBaseSummaries", []):
+        if knowledge_base["name"] != knowledge_base_name:
+            continue
+        new_knowledge_base_id = knowledge_base["knowledgeBaseId"]
+        knowledge_base_id = new_knowledge_base_id
+        config["knowledge_base_id"] = new_knowledge_base_id
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=4)
+        logger.info(f"Updated knowledge_base_id to: {new_knowledge_base_id}")
+        return new_knowledge_base_id
+
+    raise RuntimeError(f"Could not find knowledge base with name: {knowledge_base_name}")
+
+
 def retrieve(query):
+    """Retrieve documents via Bedrock Knowledge Base GraphRAG (Neptune Analytics).
+
+    The Knowledge Base vector store is Neptune Analytics. retrieve() performs
+    vector search plus graph traversal enrichment automatically.
+    """
     global knowledge_base_id
     
     try:
         response = bedrock_agent_runtime_client.retrieve(
             retrievalQuery={"text": query},
             knowledgeBaseId=knowledge_base_id,
-                retrievalConfiguration={
-                    "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-                    },
-                )
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {"numberOfResults": number_of_results},
+            },
+        )
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         
@@ -69,55 +97,27 @@ def retrieve(query):
             logger.warning(f"ResourceNotFoundException occurred: {e}")
             logger.info("Attempting to update knowledge_base_id...")
             
-            bedrock_region = config.get('region', 'us-west-2')
-            projectName = config.get('projectName')
-
-            bedrock_agent_client = boto3.client("bedrock-agent", region_name=bedrock_region)
-            knowledge_base_list = bedrock_agent_client.list_knowledge_bases()
-            
-            updated = False
-            for knowledge_base in knowledge_base_list.get("knowledgeBaseSummaries", []):
-                if knowledge_base["name"] == projectName:
-                    new_knowledge_base_id = knowledge_base["knowledgeBaseId"]
-                    knowledge_base_id = new_knowledge_base_id
-
-                    config['knowledge_base_id'] = new_knowledge_base_id
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        json.dump(config, f, ensure_ascii=False, indent=4)
-                    
-                    logger.info(f"Updated knowledge_base_id to: {new_knowledge_base_id}")
-                    updated = True
-                    break
-            
-            if updated:
-                # Retry after updating knowledge_base_id
-                try:
-                    response = bedrock_agent_runtime_client.retrieve(
-                        retrievalQuery={"text": query},
-                        knowledgeBaseId=knowledge_base_id,
-                        retrievalConfiguration={
-                            "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-                        },
-                    )
-                    logger.info("Retry successful after updating knowledge_base_id")
-                except Exception as retry_error:
-                    logger.error(f"Retry failed after updating knowledge_base_id: {retry_error}")
-                    raise
-            else:
-                logger.error(f"Could not find knowledge base with name: {projectName}")
+            try:
+                _resolve_knowledge_base_id()
+                response = bedrock_agent_runtime_client.retrieve(
+                    retrievalQuery={"text": query},
+                    knowledgeBaseId=knowledge_base_id,
+                    retrievalConfiguration={
+                        "vectorSearchConfiguration": {"numberOfResults": number_of_results},
+                    },
+                )
+                logger.info("Retry successful after updating knowledge_base_id")
+            except Exception as retry_error:
+                logger.error(f"Retry failed after updating knowledge_base_id: {retry_error}")
                 raise
         else:
-            # Re-raise other errors that are not ResourceNotFoundException
             logger.error(f"Error retrieving: {e}")
             raise
     except Exception as e:
-        # Re-raise other exceptions that are not ClientError
         logger.error(f"Unexpected error retrieving: {e}")
         raise
     
-    # logger.info(f"response: {response}")
     retrieval_results = response.get("retrievalResults", [])
-    # logger.info(f"retrieval_results: {retrieval_results}")
 
     json_docs = []
     for result in retrieval_results:
@@ -145,7 +145,7 @@ def retrieve(query):
             "reference": {
                 "url": url,                   
                 "title": name,
-                "from": "RAG"
+                "from": "GraphRAG"
             }
         })
     logger.info(f"json_docs: {json_docs}")

@@ -68,16 +68,15 @@ vector_index_name = project_name
 - `discordapikey-{project_name}`: Discord Bot API 키
 - `slackapikey-{project_name}`: Slack API 키
 
-### 4. OpenSearch Serverless
-- **컬렉션**: Vector 검색용 서버리스 컬렉션
-- **정책**: 암호화, 네트워크, 데이터 액세스 정책
-- **인덱스**: KNN 벡터 검색 인덱스 (1024차원)
+### 4. Neptune Analytics (GraphRAG)
+- **그래프**: `rag-project` (32 m-NCU, 벡터 차원 1024)
+- **용도**: Bedrock Knowledge Bases GraphRAG 벡터+그래프 스토어
 
 ### 5. Bedrock Knowledge Base
-- **스토리지**: OpenSearch Serverless
-- **임베딩 모델**: Amazon Titan Embed Text v2 (1024차원)
-- **파싱 모델**: Claude Sonnet
-- **청킹**: Hierarchical (1500/300 토큰)
+- **스토리지**: Amazon Neptune Analytics (`NEPTUNE_ANALYTICS`)
+- **임베딩 모델**: Amazon Titan Embed Text v2 (1024차원, FLOAT32)
+- **그래프 구성 모델**: Claude Haiku 4.5 (CHUNK_ENTITY_EXTRACTION)
+- **청킹**: Fixed size (300 토큰, overlap 20%)
 
 ### 6. CloudFront (S3 오리진)
 - **Comment**: `CloudFront-for-rag-project`
@@ -101,11 +100,11 @@ S3 버킷 생성 및 CORS, 퍼블릭 액세스 차단 설정
 #### `create_iam_role()`
 IAM 역할 생성 및 관리형 정책 연결
 
-#### `create_opensearch_collection()`
-OpenSearch Serverless 컬렉션 및 보안 정책 생성
+#### `create_neptune_analytics_graph()`
+Neptune Analytics 그래프 및 벡터 인덱스 생성
 
-#### `create_knowledge_base_with_opensearch()`
-Bedrock Knowledge Base 생성
+#### `create_knowledge_base_with_neptune()`
+Bedrock Knowledge Base(GraphRAG) 생성
 
 #### `create_cloudfront_distribution()`
 S3 오리진 CloudFront 배포 생성 (OAI + 버킷 정책)
@@ -142,16 +141,16 @@ streamlit run application/app.py
 [2/6] S3 버킷 생성
        ↓
 [3/6] IAM 역할 생성
-       • Knowledge Base / Agent / AgentCore Memory 역할
+       • Knowledge Base / Agent 역할
        • AgentCore Web Search Gateway 역할 및 Gateway 생성
        ↓
-[4/6] OpenSearch Serverless 컬렉션 생성
+[4/6] Neptune Analytics 그래프 생성 (벡터 인덱스 1024차원)
        ↓
-[5/6] Bedrock Knowledge Base 생성
+[5/6] Bedrock Knowledge Base(GraphRAG) 생성
        ↓
 [6/6] CloudFront 배포 생성 (S3 오리진)
        ↓
-application/config.json 업데이트 (sharing_url 포함)
+application/config.json 업데이트 (sharing_url, neptune_graph_* 포함)
 ```
 
 ---
@@ -165,20 +164,23 @@ Infrastructure Deployment Completed Successfully!
 Summary:
   S3 Bucket: storage-for-rag-project-{account_id}-us-west-2
   CloudFront Domain: https://xxxxxxxxx.cloudfront.net
-  OpenSearch Endpoint: https://xxxxxxxx.us-west-2.aoss.amazonaws.com
+  Neptune Graph ARN: arn:aws:neptune-graph:us-west-2:...:graph/...
   Knowledge Base ID: XXXXXXXXXX
 
 Total deployment time: XX.XX minutes
 ================================================================
+Upload documents to s3://.../docs/ then Sync the Knowledge Base.
 Run locally: streamlit run application/app.py
 Note: CloudFront distribution may take 15-20 minutes to fully deploy
 ================================================================
 ```
 
 ### 주의사항
-- `application/config.json` 파일이 자동으로 업데이트됩니다 (`sharing_url` 포함)
+- `application/config.json` 파일이 자동으로 업데이트됩니다 (`sharing_url`, `neptune_graph_*` 포함)
 - Gateway는 `us-east-1`에 생성되며, 애플리케이션 리전과 다를 수 있습니다
 - `docs/`, `artifacts/` 등 S3 정적 파일은 CloudFront URL로 공유됩니다
+- Knowledge Base 삭제 후 Neptune 그래프도 반드시 삭제하세요 (미삭제 시 과금 지속)
+- 기존 OpenSearch 기반 KB가 있으면 installer가 Neptune용으로 재생성합니다
 
 ---
 

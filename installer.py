@@ -20,6 +20,9 @@ AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
 vector_index_name = "rag-project"
+neptune_graph_name = "rag-project"
+neptune_provisioned_memory = 32  # m-NCU (POC). Min 16; 32 recommended for GraphRAG POC
+embedding_dimensions = 1024
 cloudfront_comment = "CloudFront-for-rag-project"
 oai_comment = f"OAI for {vector_index_name}"
 
@@ -32,7 +35,7 @@ knowledge_base_role_name = f"role-knowledge-base-for-{vector_index_name}-{region
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
 secrets_client = boto3.client("secretsmanager", region_name=region)
-opensearch_client = boto3.client("opensearchserverless", region_name=region)
+neptune_graph_client = boto3.client("neptune-graph", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 agentcore_control_client = boto3.client(
     "bedrock-agentcore-control",
@@ -301,17 +304,27 @@ def create_knowledge_base_role() -> str:
     }
     attach_inline_policy(role_name, f"knowledge-base-s3-policy-for-{vector_index_name}", s3_policy)
     
-    opensearch_policy = {
+    neptune_policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
+                "Sid": "NeptuneAnalyticsAccess",
                 "Effect": "Allow",
-                "Action": ["aoss:APIAccessAll"],
-                "Resource": ["*"]
+                "Action": [
+                    "neptune-graph:GetGraph",
+                    "neptune-graph:ReadDataViaQuery",
+                    "neptune-graph:WriteDataViaQuery",
+                    "neptune-graph:DeleteDataViaQuery",
+                ],
+                "Resource": [f"arn:aws:neptune-graph:{region}:{account_id}:graph/*"],
             }
-        ]
+        ],
     }
-    attach_inline_policy(role_name, f"bedrock-agent-opensearch-policy-for-{vector_index_name}", opensearch_policy)
+    attach_inline_policy(
+        role_name,
+        f"bedrock-agent-neptune-policy-for-{vector_index_name}",
+        neptune_policy,
+    )
     
     bedrock_policy = {
         "Version": "2012-10-17",
@@ -528,446 +541,145 @@ def create_secrets() -> Dict[str, str]:
     return secret_arns
 
 
-def _get_installer_iam_arn() -> str:
-    """Return IAM ARN for the credentials running this installer."""
-    identity = sts_client.get_caller_identity()
-    arn = identity["Arn"]
-    if ":assumed-role/" in arn:
-        role_name = arn.split(":assumed-role/")[1].split("/")[0]
-        return f"arn:aws:iam::{identity['Account']}:role/{role_name}"
-    return arn
+def create_neptune_analytics_graph() -> Dict[str, str]:
+    """Create Neptune Analytics graph with vector search index for GraphRAG."""
+    logger.info("[4/6] Creating Neptune Analytics graph")
 
-
-def _shared_opensearch_policy_names() -> Dict[str, str]:
-    """Policy names for the shared rag-project OpenSearch collection."""
-    return {
-        "enc": f"enc-{vector_index_name}-{region}",
-        "net": f"net-{vector_index_name}-{region}",
-        "data": f"data-{vector_index_name}",
-    }
-
-
-def _build_opensearch_data_policy_document(collection_name: str, principals: List[str]) -> List[Dict]:
-    """Build OpenSearch Serverless data access policy document."""
-    return [
-        {
-            "Rules": [
-                {
-                    "Resource": [f"collection/{collection_name}"],
-                    "Permission": [
-                        "aoss:CreateCollectionItems",
-                        "aoss:DeleteCollectionItems",
-                        "aoss:UpdateCollectionItems",
-                        "aoss:DescribeCollectionItems",
-                    ],
-                    "ResourceType": "collection",
-                },
-                {
-                    "Resource": [f"index/{collection_name}/*"],
-                    "Permission": [
-                        "aoss:CreateIndex",
-                        "aoss:DeleteIndex",
-                        "aoss:UpdateIndex",
-                        "aoss:DescribeIndex",
-                        "aoss:ReadDocument",
-                        "aoss:WriteDocument",
-                    ],
-                    "ResourceType": "index",
-                },
-            ],
-            "Principal": principals,
-        }
-    ]
-
-
-def _opensearch_data_access_principals(knowledge_base_role_arn: Optional[str] = None) -> List[str]:
-    principals = [
-        f"arn:aws:iam::{account_id}:root",
-        _get_installer_iam_arn(),
-    ]
-    if knowledge_base_role_arn:
-        principals.append(knowledge_base_role_arn)
-    return principals
-
-
-def _ensure_opensearch_security_policies(collection_name: str) -> None:
-    """Create shared encryption/network policies when missing (e.g. after cleanup)."""
-    policy_names = _shared_opensearch_policy_names()
-    enc_policy_name = policy_names["enc"]
-    net_policy_name = policy_names["net"]
-
-    enc_policy = {
-        "Rules": [
-            {
-                "ResourceType": "collection",
-                "Resource": [f"collection/{collection_name}"],
-            }
-        ],
-        "AWSOwnedKey": True,
-    }
+    # Reuse existing graph if present
     try:
-        opensearch_client.create_security_policy(
-            name=enc_policy_name,
-            type="encryption",
-            description=f"opensearch encryption policy for {vector_index_name}",
-            policy=json.dumps(enc_policy),
-        )
-        logger.info(f"  Created encryption policy: {enc_policy_name}")
-    except ClientError as e:
-        if e.response["Error"]["Code"] != "ConflictException":
-            raise
-        logger.debug(f"  Encryption policy already exists: {enc_policy_name}")
-
-    net_policy = [
-        {
-            "Rules": [
-                {
-                    "ResourceType": "dashboard",
-                    "Resource": [f"collection/{collection_name}"],
-                },
-                {
-                    "ResourceType": "collection",
-                    "Resource": [f"collection/{collection_name}"],
-                },
-            ],
-            "AllowFromPublic": True,
-        }
-    ]
-    try:
-        opensearch_client.create_security_policy(
-            name=net_policy_name,
-            type="network",
-            description=f"opensearch network policy for {vector_index_name}",
-            policy=json.dumps(net_policy),
-        )
-        logger.info(f"  Created network policy: {net_policy_name}")
-    except ClientError as e:
-        if e.response["Error"]["Code"] != "ConflictException":
-            raise
-        logger.debug(f"  Network policy already exists: {net_policy_name}")
-
-
-def _find_opensearch_data_policy_name(collection_name: str) -> Optional[str]:
-    """Find the data access policy attached to a shared OpenSearch collection."""
-    candidates = [
-        f"data-{vector_index_name}",
-        f"data-agent-plugins",
-        f"data-{project_name}",
-    ]
-    for name in candidates:
-        try:
-            opensearch_client.get_access_policy(name=name, type="data")
-            return name
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ResourceNotFoundException":
-                raise
-
-    collection_resource = f"collection/{collection_name}"
-    next_token = None
-    while True:
-        kwargs: Dict = {"type": "data"}
-        if next_token:
-            kwargs["nextToken"] = next_token
-        response = opensearch_client.list_access_policies(**kwargs)
-        for summary in response.get("accessPolicySummaries", []):
-            name = summary["name"]
-            detail = opensearch_client.get_access_policy(name=name, type="data")
-            policy = detail["accessPolicyDetail"]["policy"]
-            policy_str = policy if isinstance(policy, str) else json.dumps(policy)
-            if collection_resource in policy_str:
-                logger.info(f"  Found existing data access policy for {collection_name}: {name}")
-                return name
-        next_token = response.get("nextToken")
-        if not next_token:
-            break
-    return None
-
-
-def _create_shared_opensearch_data_policy(
-    collection_name: str,
-    knowledge_base_role_arn: Optional[str] = None,
-) -> str:
-    """Create the shared data access policy for an existing collection."""
-    data_policy_name = _shared_opensearch_policy_names()["data"]
-    principals = _opensearch_data_access_principals(knowledge_base_role_arn)
-    data_policy = _build_opensearch_data_policy_document(collection_name, principals)
-    opensearch_client.create_access_policy(
-        name=data_policy_name,
-        type="data",
-        policy=json.dumps(data_policy),
-    )
-    logger.info(f"  Created data access policy: {data_policy_name}")
-    logger.info("  Waiting for OpenSearch data access policy to propagate...")
-    time.sleep(20)
-    return data_policy_name
-
-
-def _ensure_opensearch_data_access_principals(
-    collection_name: str,
-    knowledge_base_role_arn: Optional[str] = None,
-) -> None:
-    """Ensure shared collection data policy grants access to installer and KB role."""
-    policy_name = _find_opensearch_data_policy_name(collection_name)
-    if not policy_name:
-        logger.warning(
-            f"  No data access policy found for collection {collection_name}; "
-            "recreating shared OpenSearch policies..."
-        )
-        _ensure_opensearch_security_policies(collection_name)
-        try:
-            _create_shared_opensearch_data_policy(collection_name, knowledge_base_role_arn)
-        except ClientError as e:
-            if e.response["Error"]["Code"] != "ConflictException":
-                raise
-            policy_name = _find_opensearch_data_policy_name(collection_name)
-            if not policy_name:
-                raise
-        else:
-            return
-
-    policy_detail = opensearch_client.get_access_policy(name=policy_name, type="data")
-    current_policy = policy_detail["accessPolicyDetail"]["policy"]
-    if isinstance(current_policy, str):
-        current_policy = json.loads(current_policy)
-
-    principals_to_add = _opensearch_data_access_principals(knowledge_base_role_arn)
-
-    needs_update = False
-    for rule in current_policy:
-        if "Principal" not in rule:
-            continue
-        current_principals = rule["Principal"]
-        if not isinstance(current_principals, list):
-            current_principals = [current_principals]
-        for principal in principals_to_add:
-            if principal and principal not in current_principals:
-                current_principals.append(principal)
-                needs_update = True
-                logger.info(f"  Adding principal to {policy_name}: {principal}")
-        rule["Principal"] = current_principals
-
-    if needs_update:
-        opensearch_client.update_access_policy(
-            name=policy_name,
-            type="data",
-            policy=json.dumps(current_policy),
-            policyVersion=policy_detail["accessPolicyDetail"]["policyVersion"],
-        )
-        logger.info(f"  Updated data access policy: {policy_name}")
-        logger.info("  Waiting for OpenSearch data access policy to propagate...")
-        time.sleep(20)
-    else:
-        logger.debug(f"  Required principals already present in {policy_name}")
-
-
-def create_opensearch_collection(knowledge_base_role_arn: str = None) -> Dict[str, str]:
-    """Create OpenSearch Serverless collection and policies."""
-    logger.info("[4/6] Creating OpenSearch Serverless collection")
-    
-    collection_name = vector_index_name
-    policy_names = _shared_opensearch_policy_names()
-    enc_policy_name = policy_names["enc"]
-    net_policy_name = policy_names["net"]
-    data_policy_name = policy_names["data"]
-    
-    # Check if collection already exists first
-    try:
-        existing_collections = opensearch_client.list_collections()
-        for collection in existing_collections.get("collectionSummaries", []):
-            if collection["name"] == collection_name and collection["status"] == "ACTIVE":
-                logger.warning(f"OpenSearch collection already exists: {collection['name']}")
-                collection_arn = collection["arn"]
-                collection_id = collection["id"]
-                
-                # Get collection endpoint
-                collection_details = opensearch_client.batch_get_collection(names=[collection_name])
-                collection_detail = collection_details["collectionDetails"][0]
-                collection_endpoint = collection_detail.get("collectionEndpoint")
-                
-                # If endpoint is not available, wait for collection to be ready
-                if not collection_endpoint:
-                    logger.info("  Collection endpoint not yet available, waiting for collection to be ready...")
-                    wait_count = 0
-                    while True:
-                        response = opensearch_client.batch_get_collection(names=[collection_name])
-                        collection_detail = response["collectionDetails"][0]
-                        status = collection_detail.get("status")
-                        wait_count += 1
-                        if wait_count % 6 == 0:  # Log every minute
-                            logger.debug(f"  Collection status: {status} (waited {wait_count * 10} seconds)")
-                        
-                        if "collectionEndpoint" in collection_detail and collection_detail["collectionEndpoint"]:
-                            collection_endpoint = collection_detail["collectionEndpoint"]
-                            if status == "ACTIVE":
-                                break
-                        elif status == "ACTIVE":
-                            # If active but no endpoint, try one more time after a short wait
-                            time.sleep(10)
-                            response = opensearch_client.batch_get_collection(names=[collection_name])
-                            collection_detail = response["collectionDetails"][0]
-                            collection_endpoint = collection_detail.get("collectionEndpoint")
-                            if collection_endpoint:
-                                break
-                        
-                        if wait_count > 60:  # Timeout after 10 minutes
-                            raise Exception(f"Timeout waiting for collection endpoint. Collection status: {status}")
-                        time.sleep(10)
-                
-                # Update data access policy for shared collection
-                _ensure_opensearch_data_access_principals(collection_name, knowledge_base_role_arn)
-                
-                return {
-                    "arn": collection_arn,
-                    "endpoint": collection_endpoint
-                }
-    except Exception as e:
-        logger.debug(f"Error checking existing collections: {e}")
-    
-    # Create encryption policy
-    _ensure_opensearch_security_policies(collection_name)
-    
-    # Create data access policy
-    principals = _opensearch_data_access_principals(knowledge_base_role_arn)
-    data_policy = _build_opensearch_data_policy_document(collection_name, principals)
-    
-    try:
-        opensearch_client.create_access_policy(
-            name=data_policy_name,
-            type="data",
-            policy=json.dumps(data_policy)
-        )
-        logger.debug(f"Created data access policy: {data_policy_name}")
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ConflictException":
-            logger.warning(f"Data access policy already exists: {data_policy_name}")
-            _ensure_opensearch_data_access_principals(collection_name, knowledge_base_role_arn)
-        else:
-            logger.error(f"Failed to create data access policy: {e}")
-            raise
-    
-    # Wait for policies to be ready
-    logger.debug("Waiting for policies to be ready...")
-    time.sleep(5)
-    
-    # Create collection
-    try:
-        response = opensearch_client.create_collection(
-            name=collection_name,
-            description=f"opensearch correction for {project_name}",
-            type="VECTORSEARCH"
-        )
-        collection_detail = response["createCollectionDetail"]
-        collection_arn = collection_detail["arn"]
-        
-        # Wait for collection to be active and get endpoint
-        logger.info("  Waiting for collection to be active (this may take a few minutes)...")
-        collection_endpoint = None
-        wait_count = 0
+        next_token = None
         while True:
-            response = opensearch_client.batch_get_collection(
-                names=[collection_name]
-            )
-            collection_detail = response["collectionDetails"][0]
-            status = collection_detail["status"]
-            wait_count += 1
-            if wait_count % 6 == 0:  # Log every minute
-                logger.debug(f"  Collection status: {status} (waited {wait_count * 10} seconds)")
-            
-            # Check if endpoint is available
-            if "collectionEndpoint" in collection_detail:
-                collection_endpoint = collection_detail["collectionEndpoint"]
-                if status == "ACTIVE":
-                    break
-            time.sleep(10)
+            kwargs = {}
+            if next_token:
+                kwargs["nextToken"] = next_token
+            response = neptune_graph_client.list_graphs(**kwargs)
+            for graph in response.get("graphs", []):
+                if graph.get("name") != neptune_graph_name:
+                    continue
+                graph_id = graph["id"]
+                detail = neptune_graph_client.get_graph(graphIdentifier=graph_id)
+                status = detail.get("status")
+                logger.warning(
+                    f"Neptune graph already exists: {neptune_graph_name} ({graph_id}), status={status}"
+                )
+                if status in ("CREATING", "UPDATING", "STARTING"):
+                    logger.info("  Waiting for existing Neptune graph to become AVAILABLE...")
+                    while True:
+                        detail = neptune_graph_client.get_graph(graphIdentifier=graph_id)
+                        status = detail.get("status")
+                        if status == "AVAILABLE":
+                            break
+                        if status in ("FAILED", "DELETING", "DELETED"):
+                            raise Exception(f"Neptune graph entered bad status: {status}")
+                        time.sleep(15)
+                elif status == "STOPPED":
+                    logger.info("  Starting stopped Neptune graph...")
+                    neptune_graph_client.start_graph(graphIdentifier=graph_id)
+                    while True:
+                        detail = neptune_graph_client.get_graph(graphIdentifier=graph_id)
+                        status = detail.get("status")
+                        if status == "AVAILABLE":
+                            break
+                        if status in ("FAILED", "DELETING"):
+                            raise Exception(f"Failed to start Neptune graph: {status}")
+                        time.sleep(15)
+                elif status != "AVAILABLE":
+                    raise Exception(f"Neptune graph is not usable (status={status})")
 
-        # Wait for opensearch correction to be ready
-        logger.debug("Waiting for opensearch correction to be ready...")
-        time.sleep(30)
-            
-        logger.info(f"✓ OpenSearch collection created: {collection_name}")
-        logger.info(f"  Endpoint: {collection_endpoint}")
-        return {
-            "arn": collection_arn,
-            "endpoint": collection_endpoint
-        }
-    
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ConflictException":
-            logger.warning(f"OpenSearch collection already exists: {collection_name}")
-            # Wait for collection endpoint to be available
-            logger.info("  Waiting for collection endpoint to be available...")
-            wait_count = 0
-            collection_endpoint = None
-            while True:
-                response = opensearch_client.batch_get_collection(names=[collection_name])
-                collection_detail = response["collectionDetails"][0]
-                status = collection_detail.get("status")
-                wait_count += 1
-                if wait_count % 6 == 0:  # Log every minute
-                    logger.debug(f"  Collection status: {status} (waited {wait_count * 10} seconds)")
-                
-                if "collectionEndpoint" in collection_detail and collection_detail["collectionEndpoint"]:
-                    collection_endpoint = collection_detail["collectionEndpoint"]
-                    if status == "ACTIVE":
-                        break
-                elif status == "ACTIVE":
-                    # If active but no endpoint, try one more time after a short wait
-                    time.sleep(10)
-                    response = opensearch_client.batch_get_collection(names=[collection_name])
-                    collection_detail = response["collectionDetails"][0]
-                    collection_endpoint = collection_detail.get("collectionEndpoint")
-                    if collection_endpoint:
-                        break
-                
-                if wait_count > 60:  # Timeout after 10 minutes
-                    raise Exception(f"Timeout waiting for collection endpoint. Collection status: {status}")
-                time.sleep(10)
-            
-            if not collection_endpoint:
-                raise Exception("Collection endpoint is not available even after waiting")
-            
-            _ensure_opensearch_data_access_principals(collection_name, knowledge_base_role_arn)
+                vector_cfg = detail.get("vectorSearchConfiguration") or {}
+                dimension = vector_cfg.get("dimension")
+                if dimension and dimension != embedding_dimensions:
+                    raise Exception(
+                        f"Existing Neptune graph vector dimension is {dimension}, "
+                        f"expected {embedding_dimensions}. Delete the graph or recreate it."
+                    )
+
+                logger.info(f"✓ Reusing Neptune graph: {detail['arn']}")
+                return {
+                    "id": graph_id,
+                    "arn": detail["arn"],
+                    "name": detail.get("name", neptune_graph_name),
+                    "endpoint": detail.get("endpoint", ""),
+                }
+            next_token = response.get("nextToken")
+            if not next_token:
+                break
+    except Exception as e:
+        if "expected" in str(e) or "not usable" in str(e) or "bad status" in str(e):
+            raise
+        logger.debug(f"Error checking existing Neptune graphs: {e}")
+
+    logger.info(
+        f"  Creating Neptune graph '{neptune_graph_name}' "
+        f"({neptune_provisioned_memory} m-NCU, vector dim={embedding_dimensions})..."
+    )
+    response = neptune_graph_client.create_graph(
+        graphName=neptune_graph_name,
+        provisionedMemory=neptune_provisioned_memory,
+        publicConnectivity=False,
+        deletionProtection=False,
+        vectorSearchConfiguration={"dimension": embedding_dimensions},
+        tags={
+            "project": project_name,
+            "purpose": "graphrag",
+        },
+    )
+    graph_id = response["id"]
+    graph_arn = response["arn"]
+    logger.info(f"  Neptune graph create requested: {graph_id}")
+
+    logger.info("  Waiting for Neptune graph to become AVAILABLE (may take several minutes)...")
+    while True:
+        detail = neptune_graph_client.get_graph(graphIdentifier=graph_id)
+        status = detail.get("status")
+        if status == "AVAILABLE":
+            logger.info(f"✓ Neptune graph AVAILABLE: {graph_arn}")
             return {
-                "arn": collection_detail["arn"],
-                "endpoint": collection_endpoint
+                "id": graph_id,
+                "arn": detail.get("arn", graph_arn),
+                "name": detail.get("name", neptune_graph_name),
+                "endpoint": detail.get("endpoint", ""),
             }
-        logger.error(f"Failed to create OpenSearch collection: {e}")
-        raise
+        if status in ("FAILED", "DELETING"):
+            reason = detail.get("statusReason", "")
+            raise Exception(f"Neptune graph creation failed: {status} {reason}")
+        logger.debug(f"  Neptune graph status: {status}")
+        time.sleep(15)
+
 
 def delete_knowledge_base(knowledge_base_id: str) -> None:
     """Delete Knowledge Base and its data sources."""
     bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
-    
+
     try:
-        # Delete all data sources first
         try:
             data_sources = bedrock_agent_client.list_data_sources(
                 knowledgeBaseId=knowledge_base_id,
-                maxResults=100
+                maxResults=100,
             )
             for ds in data_sources.get("dataSourceSummaries", []):
                 try:
                     bedrock_agent_client.delete_data_source(
                         knowledgeBaseId=knowledge_base_id,
-                        dataSourceId=ds["dataSourceId"]
+                        dataSourceId=ds["dataSourceId"],
                     )
                     logger.debug(f"Deleted data source: {ds['dataSourceId']}")
                 except Exception as e:
                     logger.warning(f"Failed to delete data source {ds['dataSourceId']}: {e}")
         except Exception as e:
             logger.debug(f"Error listing/deleting data sources: {e}")
-        
-        # Delete the knowledge base
+
         bedrock_agent_client.delete_knowledge_base(knowledgeBaseId=knowledge_base_id)
         logger.info(f"Deleted Knowledge Base: {knowledge_base_id}")
-        
-        # Wait for deletion to complete
+
         logger.debug("Waiting for Knowledge Base deletion to complete...")
-        max_wait = 60  # Wait up to 60 seconds
+        max_wait = 60
         waited = 0
         while waited < max_wait:
             try:
-                kb_response = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=knowledge_base_id)
+                kb_response = bedrock_agent_client.get_knowledge_base(
+                    knowledgeBaseId=knowledge_base_id
+                )
                 status = kb_response["knowledgeBase"]["status"]
                 if status == "DELETED":
                     break
@@ -978,7 +690,7 @@ def delete_knowledge_base(knowledge_base_id: str) -> None:
                     logger.debug("Knowledge Base deletion confirmed")
                     break
                 raise
-        
+
     except ClientError as e:
         if e.response["Error"]["Code"] == "ResourceNotFoundException":
             logger.debug(f"Knowledge Base {knowledge_base_id} already deleted")
@@ -987,283 +699,170 @@ def delete_knowledge_base(knowledge_base_id: str) -> None:
             raise
 
 
-def create_vector_index_in_opensearch(collection_endpoint: str, index_name: str) -> bool:
-    """Create vector index in OpenSearch Serverless collection."""
-    try:
-        # Validate collection_endpoint
-        if not collection_endpoint or not collection_endpoint.strip():
-            logger.error(f"  Invalid collection endpoint: '{collection_endpoint}'. Collection endpoint is required.")
-            return False
-        
-        # Ensure endpoint has proper scheme
-        if not collection_endpoint.startswith(('http://', 'https://')):
-            logger.error(f"  Invalid collection endpoint format: '{collection_endpoint}'. Must start with http:// or https://")
-            return False
-        
-        # Try to import required packages, install if missing
-        try:
-            import requests
-            from requests_aws4auth import AWS4Auth
-        except ImportError:
-            logger.info("  Installing required packages for OpenSearch index creation...")
-            import subprocess
-            import sys
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "requests-aws4auth"])
-            import requests
-            from requests_aws4auth import AWS4Auth
-        
-        # Get AWS credentials
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        awsauth = AWS4Auth(credentials.access_key, credentials.secret_key, region, 'aoss', session_token=credentials.token)
-        
-        # Check if index already exists (retry while data access policy propagates)
-        url = f"{collection_endpoint}/{index_name}"
-        for attempt in range(6):
-            response = requests.get(url, auth=awsauth, timeout=30)
-            if response.status_code == 200:
-                logger.debug(f"Vector index '{index_name}' already exists")
-                return True
-            if response.status_code in (401, 403) and attempt < 5:
-                wait_seconds = 10 * (attempt + 1)
-                logger.info(
-                    f"  OpenSearch returned {response.status_code}; "
-                    f"waiting {wait_seconds}s for data access policy propagation "
-                    f"(attempt {attempt + 1}/5)..."
-                )
-                time.sleep(wait_seconds)
-                continue
-            if response.status_code == 401:
-                logger.error(
-                    "  Unauthorized (401) accessing OpenSearch. "
-                    f"Ensure {_get_installer_iam_arn()} is in the collection data access policy."
-                )
-                return False
-            if response.status_code == 403:
-                logger.error(f"  Forbidden (403) accessing OpenSearch index '{index_name}'")
-                return False
+def _verify_knowledge_base_role() -> None:
+    """Ensure Knowledge Base role trust policy allows bedrock.amazonaws.com."""
+    logger.info("  Verifying Knowledge Base role configuration...")
+    role_response = iam_client.get_role(RoleName=knowledge_base_role_name)
+    policy_doc = role_response["Role"]["AssumeRolePolicyDocument"]
+    if isinstance(policy_doc, str):
+        trust_policy = json.loads(policy_doc)
+    else:
+        trust_policy = policy_doc
+
+    bedrock_allowed = False
+    for statement in trust_policy.get("Statement", []):
+        if statement.get("Effect") != "Allow":
+            continue
+        principal = statement.get("Principal", {})
+        if principal.get("Service") == "bedrock.amazonaws.com":
+            bedrock_allowed = True
             break
-        
-        # Index mapping for vector search
-        index_mapping = {
-            "settings": {
-                "index": {
-                    "knn": True,
-                    "knn.algo_param.ef_search": 512
-                }
-            },
-            "mappings": {
-                "properties": {
-                    "vector_field": {
-                        "type": "knn_vector",
-                        "dimension": 1024,
-                        "method": {
-                            "name": "hnsw",
-                            "space_type": "cosinesimil",
-                            "engine": "faiss",
-                            "parameters": {
-                                "ef_construction": 512,
-                                "m": 16
-                            }
-                        }
-                    },
-                    "AMAZON_BEDROCK_TEXT": {
-                        "type": "text"
-                    },
-                    "AMAZON_BEDROCK_METADATA": {
-                        "type": "text"
-                    }
-                }
-            }
-        }
-        
-        # Create index
-        headers = {"Content-Type": "application/json"}
-        response = requests.put(
-            url,
-            auth=awsauth,
-            headers=headers,
-            data=json.dumps(index_mapping),
-            timeout=30
-        )
-        
-        if response.status_code in [200, 201]:
-            logger.info(f"  ✓ Vector index '{index_name}' created successfully")
-            logger.info("  Waiting for index to be ready...")
-            time.sleep(30)  # Wait for index to be ready
-            return True
-        else:
-            logger.error(f"  Failed to create vector index: {response.status_code} - {response.text}")
-            return False
-            
-    except ImportError:
-        logger.error("  requests-aws4auth package is required. Install with: pip install requests-aws4auth")
-        return False
-    except Exception as e:
-        logger.error(f"  Error creating vector index: {e}")
-        return False
+
+    if not bedrock_allowed:
+        raise Exception("Knowledge Base role trust policy does not allow bedrock.amazonaws.com")
+    logger.info("  ✓ Knowledge Base role trust policy is correct")
 
 
-def create_knowledge_base_with_opensearch(opensearch_info: Dict[str, str], knowledge_base_role_arn: str, s3_bucket_name: str) -> str:
-    """Create Knowledge Base with correct OpenSearch collection."""
-    logger.info("[5/6] Creating Knowledge Base with OpenSearch collection")
-    
-    # Create vector index first
-    logger.info("  Creating vector index in OpenSearch collection...")
-    if not create_vector_index_in_opensearch(opensearch_info["endpoint"], vector_index_name):
-        raise Exception("Failed to create vector index in OpenSearch collection")
-    
+def create_knowledge_base_with_neptune(
+    neptune_info: Dict[str, str],
+    knowledge_base_role_arn: str,
+    s3_bucket_name: str,
+) -> str:
+    """Create Bedrock Knowledge Base backed by Neptune Analytics (GraphRAG)."""
+    logger.info("[5/6] Creating Knowledge Base with Neptune Analytics (GraphRAG)")
+
     bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
-    # parsing_model_arn = f"arn:aws:bedrock:{region}:{account_id}:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
-    parsing_model_arn = f"arn:aws:bedrock:{region}:{account_id}:inference-profile/global.anthropic.claude-sonnet-4-6"
-    
-    # Check if Knowledge Base already exists
+    graph_construction_model_arn = (
+        f"arn:aws:bedrock:{region}:{account_id}:"
+        "inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    )
+
+    # Reuse existing KB if it already points at this Neptune graph
     try:
         logger.info("  Checking if Knowledge Base already exists...")
         kb_list = bedrock_agent_client.list_knowledge_bases()
         for kb in kb_list.get("knowledgeBaseSummaries", []):
-            if kb["name"] == knowledge_base_name:
-                logger.warning(f"Knowledge Base already exists: {kb['knowledgeBaseId']}")
-                
-                # Verify it's using the correct OpenSearch collection
-                kb_details = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=kb["knowledgeBaseId"])
-                kb_collection_arn = kb_details["knowledgeBase"]["storageConfiguration"]["opensearchServerlessConfiguration"]["collectionArn"]
-                
-                if kb_collection_arn != opensearch_info["arn"]:
-                    logger.warning(f"Knowledge Base is using wrong OpenSearch collection:")
-                    logger.warning(f"  Current: {kb_collection_arn}")
-                    logger.warning(f"  Expected: {opensearch_info['arn']}")
+            if kb["name"] != knowledge_base_name:
+                continue
+            logger.warning(f"Knowledge Base already exists: {kb['knowledgeBaseId']}")
+            kb_details = bedrock_agent_client.get_knowledge_base(
+                knowledgeBaseId=kb["knowledgeBaseId"]
+            )
+            storage = kb_details["knowledgeBase"].get("storageConfiguration", {})
+            storage_type = storage.get("type")
+            neptune_cfg = storage.get("neptuneAnalyticsConfiguration") or {}
+            current_graph_arn = neptune_cfg.get("graphArn")
 
-                    delete_knowledge_base(kb["knowledgeBaseId"])
-                    break                    
-                else:
-                    logger.info(f"Knowledge Base is using correct OpenSearch collection")                
-                    return kb["knowledgeBaseId"]
+            if storage_type == "NEPTUNE_ANALYTICS" and current_graph_arn == neptune_info["arn"]:
+                logger.info("Knowledge Base is using the correct Neptune Analytics graph")
+                return kb["knowledgeBaseId"]
+
+            logger.warning("Knowledge Base is not using the expected Neptune graph:")
+            logger.warning(f"  storage type: {storage_type}")
+            logger.warning(f"  current graph: {current_graph_arn}")
+            logger.warning(f"  expected graph: {neptune_info['arn']}")
+            delete_knowledge_base(kb["knowledgeBaseId"])
+            break
         logger.info("  Knowledge Base does not exist. Creating new one...")
     except Exception as e:
         logger.debug(f"Error checking existing Knowledge Base: {e}")
-    
-    # Verify Knowledge Base role before creating
-    logger.info("  Verifying Knowledge Base role configuration...")
-    try:
-        role_response = iam_client.get_role(RoleName=knowledge_base_role_name)
-        policy_doc = role_response["Role"]["AssumeRolePolicyDocument"]
-        # Handle both string and dict formats (boto3 may return either)
-        if isinstance(policy_doc, str):
-            trust_policy = json.loads(policy_doc)
-        else:
-            trust_policy = policy_doc
-        logger.debug(f"  Role trust policy: {json.dumps(trust_policy, indent=2)}")
-        
-        # Verify trust policy allows bedrock.amazonaws.com
-        statements = trust_policy.get("Statement", [])
-        bedrock_allowed = False
-        for statement in statements:
-            if statement.get("Effect") == "Allow":
-                principal = statement.get("Principal", {})
-                if principal.get("Service") == "bedrock.amazonaws.com":
-                    bedrock_allowed = True
-                    break
-        
-        if not bedrock_allowed:
-            logger.error("  ✗ Knowledge Base role trust policy does not allow bedrock.amazonaws.com")
-            logger.error("  Please update the role trust policy manually or delete and recreate the role")
-            raise Exception("Knowledge Base role trust policy is incorrect")
-        
-        logger.info("  ✓ Knowledge Base role trust policy is correct")
-    except ClientError as role_error:
-        logger.error(f"  ✗ Failed to verify Knowledge Base role: {role_error}")
-        raise
-    
-    # Create Knowledge Base
-    logger.debug(f"Creating Knowledge Base with OpenSearch collection: {opensearch_info['arn']}")
+
+    _verify_knowledge_base_role()
+
+    # IAM propagation for newly attached Neptune permissions
+    logger.info("  Waiting for IAM role policy propagation...")
+    time.sleep(10)
+
+    logger.debug(f"Creating Knowledge Base with Neptune graph: {neptune_info['arn']}")
     response = bedrock_agent_client.create_knowledge_base(
         name=knowledge_base_name,
-        description="Knowledge base based on OpenSearch",
+        description="GraphRAG knowledge base based on Neptune Analytics",
         roleArn=knowledge_base_role_arn,
-        tags={
-            knowledge_base_name: 'true'
-        },
+        tags={knowledge_base_name: "true", "vectorStore": "NEPTUNE_ANALYTICS"},
         knowledgeBaseConfiguration={
             "type": "VECTOR",
             "vectorKnowledgeBaseConfiguration": {
-                "embeddingModelArn": f"arn:aws:bedrock:{region}::foundation-model/amazon.titan-embed-text-v2:0",
+                "embeddingModelArn": (
+                    f"arn:aws:bedrock:{region}::foundation-model/"
+                    "amazon.titan-embed-text-v2:0"
+                ),
                 "embeddingModelConfiguration": {
                     "bedrockEmbeddingModelConfiguration": {
-                        "dimensions": 1024
+                        "dimensions": embedding_dimensions,
+                        "embeddingDataType": "FLOAT32",
                     }
-                }
-            }
+                },
+            },
         },
         storageConfiguration={
-            "type": "OPENSEARCH_SERVERLESS",
-            "opensearchServerlessConfiguration": {
-                "collectionArn": opensearch_info["arn"],
+            "type": "NEPTUNE_ANALYTICS",
+            "neptuneAnalyticsConfiguration": {
+                "graphArn": neptune_info["arn"],
                 "fieldMapping": {
-                    "metadataField": "AMAZON_BEDROCK_METADATA",
-                    "textField": "AMAZON_BEDROCK_TEXT",
-                    "vectorField": "vector_field"
+                    "textField": "text",
+                    "metadataField": "metadata",
                 },
-                "vectorIndexName": vector_index_name
-            }
-        }
+            },
+        },
     )
-    
+
     knowledge_base_id = response["knowledgeBase"]["knowledgeBaseId"]
     logger.info(f"✓ Knowledge Base created: {knowledge_base_id}")
-    
-    # Wait for Knowledge Base to be active
+
     logger.info("  Waiting for Knowledge Base to be active...")
     while True:
-        kb_response = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=knowledge_base_id)
+        kb_response = bedrock_agent_client.get_knowledge_base(
+            knowledgeBaseId=knowledge_base_id
+        )
         status = kb_response["knowledgeBase"]["status"]
-        
         if status == "ACTIVE":
             logger.info("  Knowledge Base is now active")
             break
-        elif status == "FAILED":
-            raise Exception("Knowledge Base creation failed")
-        
+        if status == "FAILED":
+            reasons = kb_response["knowledgeBase"].get("failureReasons", [])
+            raise Exception(f"Knowledge Base creation failed: {reasons}")
         logger.debug(f"  Knowledge Base status: {status} (waiting...)")
         time.sleep(10)
-    
-    # Create data source
-    logger.info("  Creating data source...")
+
+    logger.info("  Creating GraphRAG data source (entity extraction enabled)...")
     data_source_response = bedrock_agent_client.create_data_source(
         knowledgeBaseId=knowledge_base_id,
         name=s3_bucket_name,
-        description=f"S3 data source: {s3_bucket_name}",
-        dataDeletionPolicy='RETAIN',
+        description=f"S3 data source for GraphRAG: {s3_bucket_name}",
+        dataDeletionPolicy="RETAIN",
         dataSourceConfiguration={
             "type": "S3",
             "s3Configuration": {
                 "bucketArn": f"arn:aws:s3:::{s3_bucket_name}",
-                "inclusionPrefixes": ["docs/"]
-            }
+                "inclusionPrefixes": ["docs/"],
+            },
         },
         vectorIngestionConfiguration={
             "chunkingConfiguration": {
-                "chunkingStrategy": "HIERARCHICAL",
-                "hierarchicalChunkingConfiguration": {
-                    "levelConfigurations": [
-                        {"maxTokens": 1500},
-                        {"maxTokens": 300}
-                    ],
-                    "overlapTokens": 60
-                }
+                "chunkingStrategy": "FIXED_SIZE",
+                "fixedSizeChunkingConfiguration": {
+                    "maxTokens": 300,
+                    "overlapPercentage": 20,
+                },
             },
-            "parsingConfiguration": {
-                "parsingStrategy": "BEDROCK_FOUNDATION_MODEL",
+            "contextEnrichmentConfiguration": {
+                "type": "BEDROCK_FOUNDATION_MODEL",
                 "bedrockFoundationModelConfiguration": {
-                    "modelArn": parsing_model_arn
-                }
-            }
-        }
+                    "modelArn": graph_construction_model_arn,
+                    "enrichmentStrategyConfiguration": {
+                        "method": "CHUNK_ENTITY_EXTRACTION",
+                    },
+                },
+            },
+        },
     )
-    
+
     data_source_id = data_source_response["dataSource"]["dataSourceId"]
     logger.info(f"  ✓ Data source created: {data_source_id}")
-    
+    logger.info(
+        "  Note: Run Bedrock Knowledge Base Sync after uploading docs/ to build the graph."
+    )
+
     return knowledge_base_id
 
 
@@ -1602,7 +1201,7 @@ def create_cloudfront_distribution(s3_bucket_name: str) -> Dict[str, str]:
 
 def build_app_environment(
     knowledge_base_role_arn: str,
-    opensearch_info: Dict[str, str],
+    neptune_info: Dict[str, str],
     s3_bucket_name: str,
     cloudfront_domain: str,
     knowledge_base_id: str,
@@ -1615,8 +1214,9 @@ def build_app_environment(
         "knowledge_base_id": knowledge_base_id,
         "knowledge_base_name": knowledge_base_name,
         "knowledge_base_role": knowledge_base_role_arn,
-        "collectionArn": opensearch_info["arn"],
-        "opensearch_url": opensearch_info["endpoint"],
+        "neptune_graph_id": neptune_info["id"],
+        "neptune_graph_arn": neptune_info["arn"],
+        "neptune_graph_name": neptune_info.get("name", neptune_graph_name),
         "s3_bucket": s3_bucket_name,
         "s3_arn": f"arn:aws:s3:::{s3_bucket_name}",
         "sharing_url": f"https://{cloudfront_domain}",
@@ -1642,6 +1242,9 @@ def write_application_config(config_data: Dict, *, merge_existing: bool = True) 
         except Exception as e:
             logger.warning(f"Could not read existing {config_path}: {e}")
     existing.update(config_data)
+    # Drop legacy OpenSearch keys after GraphRAG / Neptune migration
+    for legacy_key in ("collectionArn", "opensearch_url"):
+        existing.pop(legacy_key, None)
     try:
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
         with open(config_path, "w") as f:
@@ -1656,7 +1259,7 @@ def build_config_from_deployment_state(
     knowledge_base_id: Optional[str] = None,
     knowledge_base_role_arn: Optional[str] = None,
     agentcore_websearch_gateway_info: Optional[Dict[str, str]] = None,
-    opensearch_info: Optional[Dict[str, str]] = None,
+    neptune_info: Optional[Dict[str, str]] = None,
     s3_bucket_name: Optional[str] = None,
     cloudfront_info: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
@@ -1670,9 +1273,10 @@ def build_config_from_deployment_state(
         config_data["knowledge_base_id"] = knowledge_base_id
     if knowledge_base_role_arn:
         config_data["knowledge_base_role"] = knowledge_base_role_arn
-    if opensearch_info:
-        config_data["collectionArn"] = opensearch_info.get("arn", "")
-        config_data["opensearch_url"] = opensearch_info.get("endpoint", "")
+    if neptune_info:
+        config_data["neptune_graph_id"] = neptune_info.get("id", "")
+        config_data["neptune_graph_arn"] = neptune_info.get("arn", "")
+        config_data["neptune_graph_name"] = neptune_info.get("name", neptune_graph_name)
     if s3_bucket_name:
         config_data["s3_bucket"] = s3_bucket_name
         config_data["s3_arn"] = f"arn:aws:s3:::{s3_bucket_name}"
@@ -1696,7 +1300,7 @@ def main():
     s3_bucket_name = None
     knowledge_base_role_arn = None
     agentcore_websearch_gateway_info = None
-    opensearch_info = None
+    neptune_info = None
     knowledge_base_id = None
     cloudfront_info = None
     app_environment = None
@@ -1711,14 +1315,14 @@ def main():
         agentcore_websearch_gateway_info = get_or_create_agentcore_websearch_gateway(
             agentcore_websearch_gateway_role_arn
         )
-        opensearch_info = create_opensearch_collection(knowledge_base_role_arn)
-        knowledge_base_id = create_knowledge_base_with_opensearch(
-            opensearch_info, knowledge_base_role_arn, s3_bucket_name
+        neptune_info = create_neptune_analytics_graph()
+        knowledge_base_id = create_knowledge_base_with_neptune(
+            neptune_info, knowledge_base_role_arn, s3_bucket_name
         )
         cloudfront_info = create_cloudfront_distribution(s3_bucket_name)
         app_environment = build_app_environment(
             knowledge_base_role_arn,
-            opensearch_info,
+            neptune_info,
             s3_bucket_name,
             cloudfront_info["domain"],
             knowledge_base_id,
@@ -1733,10 +1337,12 @@ def main():
         logger.info("=" * 60)
         logger.info(f"  S3 Bucket: {s3_bucket_name}")
         logger.info(f"  CloudFront Domain: https://{cloudfront_info['domain']}")
-        logger.info(f"  OpenSearch Endpoint: {opensearch_info['endpoint']}")
+        logger.info(f"  Neptune Graph ARN: {neptune_info['arn']}")
+        logger.info(f"  Neptune Graph ID: {neptune_info['id']}")
         logger.info(f"  Knowledge Base ID: {knowledge_base_id}")
         logger.info(f"  Knowledge Base Role: {knowledge_base_role_arn}")
         logger.info(f"Total deployment time: {elapsed_time / 60:.2f} minutes")
+        logger.info("Upload documents to s3://{}/docs/ then Sync the Knowledge Base.".format(s3_bucket_name))
         logger.info("Run locally: streamlit run application/app.py")
         logger.info("=" * 60)
     except Exception as e:
@@ -1753,7 +1359,7 @@ def main():
                 knowledge_base_id=knowledge_base_id,
                 knowledge_base_role_arn=knowledge_base_role_arn,
                 agentcore_websearch_gateway_info=agentcore_websearch_gateway_info,
-                opensearch_info=opensearch_info,
+                neptune_info=neptune_info,
                 s3_bucket_name=s3_bucket_name,
                 cloudfront_info=cloudfront_info,
             )

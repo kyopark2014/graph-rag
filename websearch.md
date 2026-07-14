@@ -189,7 +189,7 @@ flowchart TB
 | **websearch** | `streamable_http` | AWS SigV4 (`us-east-1`) | AgentCore 관리형 Web Search |
 | tavily | stdio | Tavily API Key | Secrets Manager (`tavilyapikey-agent-skills`) |
 | web_fetch | stdio | 없음 | URL 본문 fetch (npx) |
-| knowledge base | stdio | IAM | OpenSearch Serverless RAG |
+| knowledge base | stdio | IAM | Neptune Analytics GraphRAG |
 
 ## Agent에서의 사용 흐름
 
