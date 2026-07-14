@@ -1,8 +1,8 @@
 # GraphRAG와 함께 Agent 구현하기
 
-Agent는 MCP뿐 아니라 [Skill](https://github.com/anthropics/skills)을 활용하여 다양한 기능을 편리하게 구현할 수 있습니다. 여기에서는 [LangGraph](https://www.langchain.com/langgraph)에서 Agent skill을 활용하는 방법에 대해 설명합니다. RAG는 **Amazon Bedrock Knowledge Bases GraphRAG + Amazon Neptune Analytics**로 구성하며, CloudFront - ALB - EC2로 Streamlit을 제공하고 LangGraph Agent에 MCP와 Skills를 연결합니다. 
+Agent는 MCP뿐 아니라 [Skill](https://github.com/anthropics/skills)을 활용하여 다양한 기능을 편리하게 구현할 수 있습니다. 여기에서는 [LangGraph](https://www.langchain.com/langgraph)에서 Agent skill을 활용하는 방법에 대해 설명합니다. RAG는 **Amazon Bedrock Knowledge Bases GraphRAG + Amazon Neptune Analytics**로 구성하며, Streamlit을 이용헤 app을 구현하고, LangGraph Agent에 MCP와 Skills를 연결합니다. 
 
-<img width="900" alt="image" src="https://github.com/user-attachments/assets/7c94c9f7-36ec-458c-bdd2-6cabdca8b461" />
+<img width="976" height="456" alt="image" src="https://github.com/user-attachments/assets/ce6878ed-62b8-420d-a04c-928c45583e57" />
 
 
 ## Graph RAG
