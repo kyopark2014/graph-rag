@@ -664,12 +664,12 @@ def main():
         print(f"  Region:   {region}")
         print("  Always removed: Secrets, project IAM roles (agent, agentcore memory)")
         print("=" * 60)
-        print("Optional resources (prompted together, default: keep):")
-        print(f"  S3 bucket:           {bucket_name}")
-        print(f"  CloudFront:          {cloudfront_comment}")
-        print(f"  Neptune graph:       {neptune_graph_name}")
-        print(f"  Knowledge Base:      {knowledge_base_name}")
-        print(f"  AgentCore gateway:   {AGENTCORE_WEBSEARCH_GATEWAY_NAME} ({AGENTCORE_GATEWAY_REGION})")
+        print("Optional resources (prompted per resource):")
+        print(f"  S3 bucket:           {bucket_name}  (default: delete)")
+        print(f"  CloudFront:          {cloudfront_comment}  (default: delete)")
+        print(f"  Neptune graph:       {neptune_graph_name}  (default: keep)")
+        print(f"  Knowledge Base:      {knowledge_base_name}  (default: keep)")
+        print(f"  AgentCore gateway:   {AGENTCORE_WEBSEARCH_GATEWAY_NAME} ({AGENTCORE_GATEWAY_REGION})  (default: keep)")
         print("=" * 60)
         print("NOTE: Delete Knowledge Base before Neptune graph to avoid orphan billing.")
         print("=" * 60)
@@ -678,15 +678,21 @@ def main():
             print("Uninstallation cancelled.")
             sys.exit(0)
 
-    def resolve(flag, prompt):
+    def resolve(flag, prompt, default=False):
         if flag:
             return True
         if args.yes:
             return False
-        return prompt_yes_no(prompt, default=False)
+        return prompt_yes_no(prompt, default=default)
 
-    delete_s3_bucket = resolve(args.delete_s3_bucket, f"\nDelete shared S3 bucket ({bucket_name})?")
-    delete_cloudfront = resolve(args.delete_cloudfront, f"Delete shared CloudFront distribution ({cloudfront_comment})?")
+    delete_s3_bucket = resolve(
+        args.delete_s3_bucket, f"\nDelete shared S3 bucket ({bucket_name})?", default=True
+    )
+    delete_cloudfront = resolve(
+        args.delete_cloudfront,
+        f"Delete shared CloudFront distribution ({cloudfront_comment})?",
+        default=True,
+    )
     delete_neptune = resolve(
         args.delete_neptune or args.delete_opensearch,
         f"Delete Neptune Analytics graph ({neptune_graph_name})?",
