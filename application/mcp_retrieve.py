@@ -140,13 +140,25 @@ def retrieve(query):
                 url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
                 name = "WEB"
 
+        page = None
+        raw_page = (result.get("metadata") or {}).get("x-amz-bedrock-kb-document-page-number")
+        if raw_page is not None:
+            try:
+                page = int(raw_page)
+            except (TypeError, ValueError):
+                page = raw_page
+
+        reference = {
+            "url": url,
+            "title": name,
+            "from": "GraphRAG",
+        }
+        if page is not None:
+            reference["page"] = page
+
         json_docs.append({
-            "contents": text,              
-            "reference": {
-                "url": url,                   
-                "title": name,
-                "from": "GraphRAG"
-            }
+            "contents": text,
+            "reference": reference,
         })
     logger.info(f"json_docs: {json_docs}")
 
