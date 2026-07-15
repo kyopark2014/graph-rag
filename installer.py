@@ -19,11 +19,11 @@ region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
-vector_index_name = "rag-project"
-neptune_graph_name = "rag-project"
+vector_index_name = "graph-rag"
+neptune_graph_name = "graph-rag"
 neptune_provisioned_memory = 32  # m-NCU (POC). Min 16; 32 recommended for GraphRAG POC
 embedding_dimensions = 1024
-cloudfront_comment = "CloudFront-for-rag-project"
+cloudfront_comment = "CloudFront-for-graph-rag"
 oai_comment = f"OAI for {vector_index_name}"
 
 sts_client = boto3.client("sts", region_name=region)

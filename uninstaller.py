@@ -14,13 +14,13 @@ import boto3
 from botocore.exceptions import ClientError
 
 # Configuration (must match installer.py)
-project_name = "agent-skills"
+project_name = "graph-rag"
 region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
-vector_index_name = "rag-project"
-neptune_graph_name = "rag-project"
-cloudfront_comment = "CloudFront-for-rag-project"
+vector_index_name = "graph-rag"
+neptune_graph_name = "graph-rag"
+cloudfront_comment = "CloudFront-for-graph-rag"
 oai_comment = f"OAI for {vector_index_name}"
 
 sts_client = boto3.client("sts", region_name=region)
@@ -427,13 +427,19 @@ def _list_all_agentcore_gateway_targets(gateway_id: str):
             break
     return targets
 
-def delete_agentcore_websearch_gateway(skip_confirmation: bool = False) -> bool:
+def delete_agentcore_websearch_gateway(confirmed: bool = False) -> bool:
     """Delete AgentCore gateway-websearch and its web-search targets.
 
     Returns True when the gateway was deleted or did not exist.
     Returns False when the user declined deletion or deletion failed.
     """
     logger.info("[3/6] Deleting AgentCore Web Search gateway")
+
+    if not confirmed:
+        logger.info(
+            "  Skipping AgentCore Web Search gateway deletion (default: no)."
+        )
+        return False
 
     gateway_id = None
     try:
@@ -450,23 +456,6 @@ def delete_agentcore_websearch_gateway(skip_confirmation: bool = False) -> bool:
                 f"  AgentCore gateway not found: {AGENTCORE_WEBSEARCH_GATEWAY_NAME}"
             )
             return True
-
-        if not skip_confirmation:
-            print("\n" + "=" * 60)
-            print(
-                f"AgentCore gateway '{AGENTCORE_WEBSEARCH_GATEWAY_NAME}' "
-                f"({gateway_id}) in {AGENTCORE_GATEWAY_REGION} will be deleted."
-            )
-            print("This includes all gateway targets (web-search connector).")
-            print("=" * 60)
-            response = input(
-                "\nDelete AgentCore Web Search gateway? (yes/no) [no]: "
-            ).strip().lower()
-            if response != "yes":
-                logger.info(
-                    "  Skipping AgentCore Web Search gateway deletion (default: no)."
-                )
-                return False
 
         for target in _list_all_agentcore_gateway_targets(gateway_id):
             target_id = target.get("targetId")
@@ -674,13 +663,13 @@ def main():
         print(f"  Project:  {project_name}")
         print(f"  Region:   {region}")
         print("  Always removed: Secrets, project IAM roles (agent, agentcore memory)")
-        print("  AgentCore gateway: prompted separately (default: keep)")
         print("=" * 60)
-        print("Shared resources (prompted separately, default: keep):")
-        print(f"  S3 bucket:        {bucket_name}")
-        print(f"  CloudFront:       {cloudfront_comment}")
-        print(f"  Neptune graph:    {neptune_graph_name}")
-        print(f"  Knowledge Base:   {knowledge_base_name}")
+        print("Optional resources (prompted together, default: keep):")
+        print(f"  S3 bucket:           {bucket_name}")
+        print(f"  CloudFront:          {cloudfront_comment}")
+        print(f"  Neptune graph:       {neptune_graph_name}")
+        print(f"  Knowledge Base:      {knowledge_base_name}")
+        print(f"  AgentCore gateway:   {AGENTCORE_WEBSEARCH_GATEWAY_NAME} ({AGENTCORE_GATEWAY_REGION})")
         print("=" * 60)
         print("NOTE: Delete Knowledge Base before Neptune graph to avoid orphan billing.")
         print("=" * 60)
@@ -703,6 +692,10 @@ def main():
         f"Delete Neptune Analytics graph ({neptune_graph_name})?",
     )
     delete_knowledge_base = resolve(args.delete_knowledge_base, f"Delete shared Knowledge Base ({knowledge_base_name})?")
+    delete_agentcore_gateway = resolve(
+        args.delete_agentcore_gateway,
+        f"Delete AgentCore Web Search gateway ({AGENTCORE_WEBSEARCH_GATEWAY_NAME})?",
+    )
 
     start_time = time.time()
     try:
@@ -722,7 +715,7 @@ def main():
             logger.info(f"[skip] Neptune graph retained (shared resource): {neptune_graph_name}")
 
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
-            skip_confirmation=args.delete_agentcore_gateway
+            confirmed=delete_agentcore_gateway
         )
         delete_secrets()
         delete_iam_roles(
