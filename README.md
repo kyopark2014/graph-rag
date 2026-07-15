@@ -442,10 +442,6 @@ git clone https://github.com/kyopark2014/graph-rag
 cd graph-rag && python3 installer.py
 ```
 
-설치가 완료되면 CloudFront로 접속하여 Agent를 실행합니다. GraphRAG용 문서는 S3 `docs/`에 올린 뒤 Knowledge Base Sync를 실행합니다.
-
-<img width="500" alt="cloudfront_address" src="https://github.com/user-attachments/assets/7ab1a699-eefb-4b55-b214-23cbeeeb7249" />
-
 인프라가 더이상 필요없을 때에는 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제합니다.
 
 ```text
