@@ -385,6 +385,25 @@ flowchart LR
 
 ### 인프라 (`installer.py`)
 
+아래와 같이 python, pip, git, boto3를 설치합니다.
+
+```text
+sudo yum install python3 python3-pip git docker -y
+pip install "boto3>=1.43.32" "botocore>=1.43.32"
+```
+
+아래와 같이 git source를 가져옵니다.
+
+```python
+git clone https://github.com/kyopark2014/graph-rag
+```
+
+아래와 같이 installer.py를 이용해 설치를 시작합니다.
+
+```python
+cd graph-rag && python3 installer.py
+```
+
 배포 시 아래를 생성·갱신합니다.
 
 1. S3 버킷 (`storage-for-rag-project-{account}-{region}`)
@@ -393,9 +412,6 @@ flowchart LR
 4. Bedrock Knowledge Base + GraphRAG 데이터 소스 (`contextEnrichmentConfiguration`)
 5. CloudFront, AgentCore Web Search Gateway 등 공통 리소스
 
-```bash
-python installer.py
-```
 
 정리 시 Knowledge Base를 먼저 삭제한 뒤 Neptune 그래프를 삭제하세요. 순서를 바꾸면 KB가 깨지거나 그래프 과금이 남을 수 있습니다.
 
