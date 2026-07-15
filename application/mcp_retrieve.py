@@ -144,7 +144,8 @@ def retrieve(query):
         raw_page = (result.get("metadata") or {}).get("x-amz-bedrock-kb-document-page-number")
         if raw_page is not None:
             try:
-                page = int(raw_page)
+                # Bedrock KB uses 0-based page numbers; convert to 1-based for display
+                page = int(raw_page) + 1
             except (TypeError, ValueError):
                 page = raw_page
 

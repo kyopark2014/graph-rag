@@ -1271,7 +1271,7 @@ def retrieve(query):
         raw_page = (result.get("metadata") or {}).get("x-amz-bedrock-kb-document-page-number")
         if raw_page is not None:
             try:
-                page = int(raw_page)
+                page = int(raw_page) + 1
             except (TypeError, ValueError):
                 page = raw_page
 
