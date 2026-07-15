@@ -109,7 +109,7 @@ with st.sidebar:
 
         # Change radio to checkbox        
         mcp_selections = {}
-        default_selections = ["web_fetch", "korea_weather", "websearch"]
+        default_selections = ["knowledge base", "web_fetch", "korea_weather", "websearch"]
         
         with st.expander("MCP 옵션 선택", expanded=True):
             for option in mcp_options:
