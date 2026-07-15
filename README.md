@@ -516,7 +516,7 @@ cd graph-rag && python3 installer.py
 python uninstaller.py --delete-knowledge-base --delete-neptune
 ```
 
-### Local에서 실행하기
+### 실행하기
 
 AWS 환경을 잘 활용하기 위해서는 [AWS CLI를 설치](https://docs.aws.amazon.com/ko_kr/cli/v1/userguide/cli-chap-install.html)하여야 합니다. EC2에서 배포하는 경우에는 별도로 설치가 필요하지 않습니다. Local에 설치시는 아래 명령어를 참조합니다.
 
