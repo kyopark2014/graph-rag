@@ -52,19 +52,7 @@ def load_config(mcp_type):
     if mcp_type == "knowledge base":
         mcp_type = "kb-retriever"    
 
-    if mcp_type == "tavily":
-        return {
-            "mcpServers": {
-                "tavily-search": {
-                    "command": "python",
-                    "args": [
-                        f"{workingDir}/mcp_server_tavily.py"
-                    ]
-                }
-            }
-        }
-        
-    elif mcp_type == "use-aws": 
+    if mcp_type == "use-aws": 
         return {
             "mcpServers": {
                 "use-aws": {

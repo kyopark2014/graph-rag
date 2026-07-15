@@ -198,8 +198,15 @@ def uses_adaptive_thinking(model_id: str | None = None) -> bool:
     return "fable" in model_id or "claude-sonnet-5" in model_id
 
 
+_BEDROCK_STRIP_BLOCK_TYPES = frozenset({
+    "thinking",
+    "redacted_thinking",
+    "reasoning",  # LangChain v1 standard; Bedrock Anthropic only accepts "thinking"
+})
+
+
 def sanitize_messages_for_bedrock(messages: list) -> list:
-    """Remove thinking blocks that cannot be replayed to Bedrock on later turns."""
+    """Remove thinking/reasoning blocks that cannot be replayed to Bedrock on later turns."""
     sanitized = []
     for msg in messages:
         if not isinstance(msg, AIMessage):
@@ -207,13 +214,31 @@ def sanitize_messages_for_bedrock(messages: list) -> list:
             continue
 
         content = msg.content
+        additional_kwargs = dict(getattr(msg, "additional_kwargs", {}) or {})
+        additional_kwargs.pop("reasoning", None)
+        additional_kwargs.pop("thinking", None)
+
         if not isinstance(content, list):
-            sanitized.append(msg)
+            if additional_kwargs != (getattr(msg, "additional_kwargs", {}) or {}):
+                sanitized.append(
+                    AIMessage(
+                        content=content,
+                        tool_calls=getattr(msg, "tool_calls", None) or [],
+                        additional_kwargs=additional_kwargs,
+                        response_metadata=getattr(msg, "response_metadata", {}),
+                        id=getattr(msg, "id", None),
+                    )
+                )
+            else:
+                sanitized.append(msg)
             continue
 
         cleaned = [
             block for block in content
-            if not (isinstance(block, dict) and block.get("type") == "thinking")
+            if not (
+                isinstance(block, dict)
+                and block.get("type") in _BEDROCK_STRIP_BLOCK_TYPES
+            )
         ]
         if not cleaned:
             cleaned = ""
@@ -228,7 +253,7 @@ def sanitize_messages_for_bedrock(messages: list) -> list:
             AIMessage(
                 content=cleaned,
                 tool_calls=getattr(msg, "tool_calls", None) or [],
-                additional_kwargs=getattr(msg, "additional_kwargs", {}),
+                additional_kwargs=additional_kwargs,
                 response_metadata=getattr(msg, "response_metadata", {}),
                 id=getattr(msg, "id", None),
             )

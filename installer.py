@@ -14,27 +14,26 @@ from typing import Dict, List, Optional
 from botocore.exceptions import ClientError
 
 # Configuration
-project_name = "agent-skills"  # at least 3 characters
+project_name = "graph-rag"  # at least 3 characters
 region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
 AGENTCORE_WEBSEARCH_TARGET_NAME = "websearch"
-vector_index_name = "graph-rag"
-neptune_graph_name = "graph-rag"
+vector_index_name = project_name
+neptune_graph_name = project_name
 neptune_provisioned_memory = 32  # m-NCU (POC). Min 16; 32 recommended for GraphRAG POC
 embedding_dimensions = 1024
-cloudfront_comment = "CloudFront-for-graph-rag"
-oai_comment = f"OAI for {vector_index_name}"
+cloudfront_comment = f"CloudFront-for-{project_name}"
+oai_comment = f"OAI for {project_name}"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
-knowledge_base_name = vector_index_name
-knowledge_base_role_name = f"role-knowledge-base-for-{vector_index_name}-{region}"
+knowledge_base_name = project_name
+knowledge_base_role_name = f"role-knowledge-base-for-{project_name}-{region}"
 
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
-secrets_client = boto3.client("secretsmanager", region_name=region)
 neptune_graph_client = boto3.client("neptune-graph", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 agentcore_control_client = boto3.client(
@@ -42,7 +41,7 @@ agentcore_control_client = boto3.client(
     region_name=AGENTCORE_GATEWAY_REGION,
 )
 
-bucket_name = f"storage-for-rag-project-{account_id}-{region}"
+bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 
 def setup_logging(log_level=logging.INFO):
     """Setup logging configuration."""
@@ -67,7 +66,7 @@ logger = setup_logging()
 
 def create_s3_bucket() -> str:
     """Create S3 bucket with CORS configuration."""
-    logger.info(f"[2/6] Creating S3 bucket: {bucket_name}")
+    logger.info(f"[1/5] Creating S3 bucket: {bucket_name}")
     
     try:
         # Create bucket
@@ -250,7 +249,7 @@ def attach_inline_policy(role_name: str, policy_name: str, policy_document: Dict
 
 def create_knowledge_base_role() -> str:
     """Create Knowledge Base IAM role."""
-    logger.info("[3/6] Creating Knowledge Base IAM role")
+    logger.info("[2/5] Creating Knowledge Base IAM role")
     role_name = knowledge_base_role_name
     
     assume_role_policy = {
@@ -349,7 +348,7 @@ def create_knowledge_base_role() -> str:
 
 def create_agent_role() -> str:
     """Create Agent IAM role."""
-    logger.info("[3/6] Creating Agent IAM role")
+    logger.info("[2/5] Creating Agent IAM role")
     role_name = f"role-agent-for-{project_name}-{region}"
     
     assume_role_policy = {
@@ -427,123 +426,9 @@ def create_agent_role() -> str:
     return role_arn
 
 
-def create_secrets() -> Dict[str, str]:
-    """Create Secrets Manager secrets."""
-    logger.info("[1/6] Creating Secrets Manager secrets")
-    logger.info("Please enter API keys when prompted (press Enter to skip and leave empty):")
-    
-    secrets = {
-        "weather": {
-            "name": f"openweathermap-{project_name}",
-            "description": "secret for weather api key",
-            "secret_value": {
-                "project_name": project_name,
-                "weather_api_key": ""
-            }
-        },
-        "tavily": {
-            "name": f"tavilyapikey-{project_name}",
-            "description": "secret for tavily api key",
-            "secret_value": {
-                "project_name": project_name,
-                "tavily_api_key": "",
-                "nova_act_api_key": ""
-            }
-        },
-        "notion": {
-            "name": f"notionapikey-{project_name}",
-            "description": "secret for notion api key",
-            "secret_value": {
-                "project_name": project_name,
-                "notion_api_key": ""
-            }
-        },
-        "telegram": {
-            "name": f"telegramapikey-{project_name}",
-            "description": "secret for telegram api key",
-            "secret_value": {
-                "project_name": project_name,
-                "telegram_api_key": ""
-            }
-        },
-        "discord": {
-            "name": f"discordapikey-{project_name}",
-            "description": "secret for discord bot token",
-            "secret_value": {
-                "project_name": project_name,
-                "discord_bot_token": ""
-            }
-        },
-        "slack": {
-            "name": f"slackapikey-{project_name}",
-            "description": "secret for slack api key",
-            "secret_value": {
-                "project_name": project_name,
-                "slack_team_id": "",
-                "slack_bot_token": ""
-            }
-        }
-    }
-    
-    secret_arns = {}
-    
-    for key, secret_config in secrets.items():
-        # Check if secret already exists before prompting for input
-        try:
-            response = secrets_client.describe_secret(SecretId=secret_config["name"])
-            secret_arns[key] = response["ARN"]
-            logger.warning(f"  Secret already exists: {secret_config['name']}")
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ResourceNotFoundException":
-                # Secret doesn't exist, prompt for API key and create it
-                if key == "tavily":
-                    logger.info(f"Enter credential of {secret_config['name']} (Tavily API Key):")
-                    api_key = input(f"Creating {secret_config['name']} - Tavily API Key: ").strip()
-                    secret_config["secret_value"]["tavily_api_key"] = api_key
-                    secret_config["secret_value"]["nova_act_api_key"] = api_key
-                elif key == "notion":
-                    logger.info(f"Enter credential of {secret_config['name']} (Notion API Key):")
-                    api_key = input(f"Creating {secret_config['name']} - Notion API Key: ").strip()
-                    secret_config["secret_value"]["notion_api_key"] = api_key
-                elif key == "telegram":
-                    logger.info(f"Enter credential of {secret_config['name']} (Telegram Bot API Key):")
-                    api_key = input(f"Creating {secret_config['name']} - Telegram Bot API Key: ").strip()
-                    secret_config["secret_value"]["telegram_api_key"] = api_key
-                elif key == "discord":
-                    logger.info(f"Enter credential of {secret_config['name']} (Discord Bot Token):")
-                    api_key = input(f"Creating {secret_config['name']} - Discord Bot Token: ").strip()
-                    secret_config["secret_value"]["discord_bot_token"] = api_key
-                elif key == "slack":
-                    logger.info(f"Enter credential of {secret_config['name']} (Slack Team ID and Bot Token):")
-                    team_id = input(f"Creating {secret_config['name']} - Slack Team ID: ").strip()
-                    bot_token = input(f"Creating {secret_config['name']} - Slack Bot Token: ").strip()
-                    secret_config["secret_value"]["slack_team_id"] = team_id
-                    secret_config["secret_value"]["slack_bot_token"] = bot_token
-                
-                # Create the secret
-                try:
-                    response = secrets_client.create_secret(
-                        Name=secret_config["name"],
-                        Description=secret_config["description"],
-                        SecretString=json.dumps(secret_config["secret_value"])
-                    )
-                    secret_arns[key] = response["ARN"]
-                    logger.info(f"  ✓ Created secret: {secret_config['name']}")
-                except ClientError as create_error:
-                    logger.error(f"  Failed to create secret {secret_config['name']}: {create_error}")
-                    raise
-            else:
-                logger.error(f"  Failed to check secret {secret_config['name']}: {e}")
-                raise
-    
-    logger.info(f"✓ Created {len(secret_arns)} secrets")
-    
-    return secret_arns
-
-
 def create_neptune_analytics_graph() -> Dict[str, str]:
     """Create Neptune Analytics graph with vector search index for GraphRAG."""
-    logger.info("[4/6] Creating Neptune Analytics graph")
+    logger.info("[3/5] Creating Neptune Analytics graph")
 
     # Reuse existing graph if present
     try:
@@ -729,7 +614,7 @@ def create_knowledge_base_with_neptune(
     s3_bucket_name: str,
 ) -> str:
     """Create Bedrock Knowledge Base backed by Neptune Analytics (GraphRAG)."""
-    logger.info("[5/6] Creating Knowledge Base with Neptune Analytics (GraphRAG)")
+    logger.info("[4/5] Creating Knowledge Base with Neptune Analytics (GraphRAG)")
 
     bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
     graph_construction_model_arn = (
@@ -923,7 +808,7 @@ def wait_for_agentcore_gateway_ready(gateway_id: str, timeout_seconds: int = 600
 
 def create_agentcore_websearch_gateway_role() -> str:
     """Create IAM service role for the AgentCore Web Search gateway."""
-    logger.info("[3/6] Creating AgentCore Web Search gateway IAM role")
+    logger.info("[2/5] Creating AgentCore Web Search gateway IAM role")
     role_name = f"role-agentcore-gateway-websearch-for-{project_name}"
 
     assume_role_policy = {
@@ -1028,7 +913,7 @@ def _ensure_websearch_gateway_target(gateway_id: str) -> str:
 
 def get_or_create_agentcore_websearch_gateway(gateway_service_role_arn: str) -> Dict[str, str]:
     """Create gateway-websearch with the managed web-search connector in us-east-1."""
-    logger.info("[3/6] Creating AgentCore Web Search gateway")
+    logger.info("[2/5] Creating AgentCore Web Search gateway")
 
     gateway_id = None
     for gateway in _list_all_agentcore_gateways():
@@ -1094,7 +979,7 @@ def _apply_websearch_gateway_config(
 
 def create_cloudfront_distribution(s3_bucket_name: str) -> Dict[str, str]:
     """Create CloudFront distribution with S3 origin (shared RAG project)."""
-    logger.info("[6/6] Creating CloudFront distribution")
+    logger.info("[5/5] Creating CloudFront distribution")
 
     try:
         distributions = cloudfront_client.list_distributions()
@@ -1307,7 +1192,6 @@ def main():
     deployment_success = False
 
     try:
-        create_secrets()
         s3_bucket_name = create_s3_bucket()
         knowledge_base_role_arn = create_knowledge_base_role()
         create_agent_role()

@@ -41,11 +41,10 @@ RUN pip install streamlit streamlit-chat streamlit_paste_button
 RUN pip install "boto3>=1.43.32" "botocore>=1.43.32" langchain_aws langchain langchain_community langchain-openai "openai>=2.41.0" "langgraph>=1.2.5" "langgraph-supervisor>=0.0.31" "langgraph-swarm>=0.1.0" langchain-text-splitters
 RUN pip install mcp "langchain-mcp-adapters>=0.3.0"
 RUN pip install pandas numpy
-RUN pip install tavily-python pytz
+RUN pip install pytz
 RUN pip install beautifulsoup4==4.12.3 plotly_express==0.4.1 matplotlib==3.10.0 
 RUN pip install opensearch-py wikipedia requests
 RUN pip install uv kaleido diagrams graphviz rich colorama finance-datareader PyPDF2 pyyaml
-RUN pip install python-telegram-bot discord.py
 RUN pip install python-pptx
 # Skills: docx / xlsx / pptx / myslide
 RUN pip install defusedxml lxml openpyxl Pillow pytesseract "markitdown[pptx]"

@@ -4,7 +4,6 @@ import json
 import traceback
 import boto3
 import os
-from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -14,10 +13,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("utils")
-
-aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
 
 workingDir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(workingDir, "config.json")
@@ -65,34 +60,6 @@ projectName = config.get('projectName', 'mop')
 logger.info(f"projectName: {projectName}")
 
 
-def persist_config_updates(updates):
-    """Merge values fetched from Secrets Manager into config and write config.json."""
-    global config
-    if not updates:
-        return
-    changed = False
-    for key, value in updates.items():
-        if value is None:
-            continue
-        s = value.strip() if isinstance(value, str) else str(value)
-        if not s:
-            continue
-        if config.get(key) != s:
-            config[key] = s
-            changed = True
-    if not changed:
-        return
-    try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        logger.info(
-            "Saved Secrets Manager values to config.json: %s",
-            ", ".join(str(k) for k in updates if updates.get(k)),
-        )
-    except Exception as e:
-        logger.warning("Failed to write config.json: %s", e)
-
-
 def get_contents_type(file_name):
     if file_name.lower().endswith((".jpg", ".jpeg")):
         content_type = "image/jpeg"
@@ -134,150 +101,6 @@ def save_mcp_env(mcp_env):
     
     with open(mcp_env_path, "w", encoding="utf-8") as f:
         json.dump(mcp_env, f)
-
-# api key to get information in agent
-if aws_access_key and aws_secret_key:
-    secretsmanager = boto3.client(
-        service_name='secretsmanager',
-        region_name=bedrock_region,
-        aws_access_key_id=aws_access_key,
-        aws_secret_access_key=aws_secret_key,
-        aws_session_token=aws_session_token,
-    )
-else:
-    secretsmanager = boto3.client(
-        service_name='secretsmanager',
-        region_name=bedrock_region
-    )
-
-# Tavily Search API key: prefer config.json, else Secrets Manager
-tavily_api_wrapper = ""
-tavily_key = (config.get("tavily_api_key") or "").strip()
-if tavily_key:
-    tavily_api_wrapper = TavilySearchAPIWrapper(tavily_api_key=tavily_key)
-    os.environ["TAVILY_API_KEY"] = tavily_key
-else:
-    try:
-        get_tavily_api_secret = secretsmanager.get_secret_value(
-            SecretId=f"tavilyapikey-{projectName}"
-        )
-        secret = json.loads(get_tavily_api_secret["SecretString"])
-
-        if "tavily_api_key" in secret:
-            tavily_key = (secret["tavily_api_key"] or "").strip()
-
-        if tavily_key:
-            tavily_api_wrapper = TavilySearchAPIWrapper(tavily_api_key=tavily_key)
-            os.environ["TAVILY_API_KEY"] = tavily_key
-            persist_config_updates({"tavily_api_key": tavily_key})
-        else:
-            logger.info("tavily_key is required.")
-    except Exception as e:
-        logger.info(f"Tavily credential is required: {e}")
-        pass
-
-# Notion API key: prefer config.json, else Secrets Manager
-notion_api_key = (config.get("notion_api_key") or "").strip()
-if notion_api_key:
-    os.environ["NOTION_API_KEY"] = notion_api_key
-else:
-    try:
-        get_notion_api_secret = secretsmanager.get_secret_value(
-            SecretId=f"notionapikey-{projectName}"
-        )
-        secret = json.loads(get_notion_api_secret["SecretString"])
-
-        if "notion_api_key" in secret:
-            notion_api_key = (secret["notion_api_key"] or "").strip()
-
-        if notion_api_key:
-            os.environ["NOTION_API_KEY"] = notion_api_key
-            persist_config_updates({"notion_api_key": notion_api_key})
-        else:
-            logger.info("notion_api_key is required.")
-    except Exception as e:
-        logger.info(f"Notion credential is required: {e}")
-        pass
-
-# Telegram API key: prefer config.json, else Secrets Manager
-telegram_api_key = (config.get("telegram_api_key") or "").strip()
-if telegram_api_key:
-    os.environ["TELEGRAM_API_KEY"] = telegram_api_key
-else:
-    try:
-        get_telegram_api_secret = secretsmanager.get_secret_value(
-            SecretId=f"telegramapikey-{projectName}"
-        )
-        secret = json.loads(get_telegram_api_secret["SecretString"])
-
-        if "telegram_api_key" in secret:
-            telegram_api_key = (secret["telegram_api_key"] or "").strip()
-
-        if telegram_api_key:
-            os.environ["TELEGRAM_API_KEY"] = telegram_api_key
-            persist_config_updates({"telegram_api_key": telegram_api_key})
-        else:
-            logger.info("telegram_api_key is required.")
-    except Exception as e:
-        logger.info(f"Telegram credential is required: {e}")
-        pass
-
-# Discord bot token: prefer config.json, else Secrets Manager
-discord_bot_token = (config.get("discord_bot_token") or "").strip()
-if discord_bot_token:
-    os.environ["DISCORD_BOT_TOKEN"] = discord_bot_token
-else:
-    try:
-        get_discord_secret = secretsmanager.get_secret_value(
-            SecretId=f"discordapikey-{projectName}"
-        )
-        secret = json.loads(get_discord_secret["SecretString"])
-
-        if "discord_bot_token" in secret:
-            discord_bot_token = (secret["discord_bot_token"] or "").strip()
-
-        if discord_bot_token:
-            os.environ["DISCORD_BOT_TOKEN"] = discord_bot_token
-            persist_config_updates({"discord_bot_token": discord_bot_token})
-        else:
-            logger.info("discord_bot_token is required.")
-    except Exception as e:
-        logger.info(f"Discord credential is required: {e}")
-        pass
-
-# Slack: prefer config.json; any missing fields are filled from Secrets Manager
-slack_bot_token = (config.get("slack_bot_token") or "").strip()
-slack_team_id = (config.get("slack_team_id") or "").strip()
-slack_token_from_config = bool(slack_bot_token)
-slack_team_from_config = bool(slack_team_id)
-if slack_bot_token:
-    os.environ["SLACK_BOT_TOKEN"] = slack_bot_token
-if slack_team_id:
-    os.environ["SLACK_TEAM_ID"] = slack_team_id
-
-if not slack_bot_token or not slack_team_id:
-    try:
-        get_slack_secret = secretsmanager.get_secret_value(
-            SecretId=f"slackapikey-{projectName}"
-        )
-        secret = json.loads(get_slack_secret["SecretString"])
-        if not slack_bot_token:
-            slack_bot_token = (secret.get("slack_bot_token") or "").strip()
-            if slack_bot_token:
-                os.environ["SLACK_BOT_TOKEN"] = slack_bot_token
-        if not slack_team_id:
-            slack_team_id = (secret.get("slack_team_id") or "").strip()
-            if slack_team_id:
-                os.environ["SLACK_TEAM_ID"] = slack_team_id
-        slack_persist = {}
-        if not slack_token_from_config and slack_bot_token:
-            slack_persist["slack_bot_token"] = slack_bot_token
-        if not slack_team_from_config and slack_team_id:
-            slack_persist["slack_team_id"] = slack_team_id
-        persist_config_updates(slack_persist)
-    except Exception as e:
-        logger.info(f"Slack credential is required: {e}")
-        pass
 
 def sanitize_data_source_name(name):
     """
@@ -354,6 +177,7 @@ if not sharing_url:
     sharing_url = update_sharing_url()
 
 def update_rag_info():
+    global knowledge_base_id, data_source_id
     knowledge_base_id = None
     data_source_id = None
     try: 
@@ -396,7 +220,11 @@ def update_rag_info():
                 if data_source['name'] == data_source_name:
                     data_source_id = data_source['dataSourceId']
                     logger.info(f"data_source_id: {data_source_id}")
-                    break    
+                    break
+            # Fallback: use the only AVAILABLE data source if name match failed
+            if not data_source_id and len(response['dataSourceSummaries']) == 1:
+                data_source_id = response['dataSourceSummaries'][0]['dataSourceId']
+                logger.info(f"data_source_id (fallback): {data_source_id}")
         
         # save config
         config['knowledge_base_id'] = knowledge_base_id
@@ -418,18 +246,44 @@ if not knowledge_base_id or not data_source_id:
     knowledge_base_id, data_source_id = update_rag_info()
 
 def sync_data_source():
-    if knowledge_base_id and data_source_id:
-        try:
-            bedrock_client = boto3.client(
-                service_name='bedrock-agent',
-                region_name=region
+    global knowledge_base_id, data_source_id
+
+    def _start_ingestion():
+        bedrock_client = boto3.client(
+            service_name='bedrock-agent',
+            region_name=region
+        )
+        return bedrock_client.start_ingestion_job(
+            knowledgeBaseId=knowledge_base_id,
+            dataSourceId=data_source_id
+        )
+
+    if not (knowledge_base_id and data_source_id):
+        knowledge_base_id, data_source_id = update_rag_info()
+
+    if not (knowledge_base_id and data_source_id):
+        logger.warning("Cannot sync: knowledge_base_id or data_source_id missing")
+        return
+
+    try:
+        response = _start_ingestion()
+        logger.info(f"(start_ingestion_job) response: {response}")
+    except Exception as e:
+        error_name = type(e).__name__
+        if "ResourceNotFound" in error_name or "ResourceNotFound" in str(e):
+            logger.info(
+                f"Stale RAG ids (kb={knowledge_base_id}, ds={data_source_id}); "
+                "refreshing and retrying..."
             )
-                
-            response = bedrock_client.start_ingestion_job(
-                knowledgeBaseId=knowledge_base_id,
-                dataSourceId=data_source_id
-            )
-            logger.info(f"(start_ingestion_job) response: {response}")
-        except Exception:
-            err_msg = traceback.format_exc()
-            logger.info(f"error message: {err_msg}")
+            knowledge_base_id, data_source_id = update_rag_info()
+            if knowledge_base_id and data_source_id:
+                try:
+                    response = _start_ingestion()
+                    logger.info(f"(start_ingestion_job retry) response: {response}")
+                    return
+                except Exception:
+                    err_msg = traceback.format_exc()
+                    logger.info(f"error message: {err_msg}")
+                    return
+        err_msg = traceback.format_exc()
+        logger.info(f"error message: {err_msg}")

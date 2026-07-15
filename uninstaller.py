@@ -18,17 +18,17 @@ project_name = "graph-rag"
 region = "us-west-2"
 AGENTCORE_GATEWAY_REGION = "us-east-1"
 AGENTCORE_WEBSEARCH_GATEWAY_NAME = "gateway-websearch"
-vector_index_name = "graph-rag"
-neptune_graph_name = "graph-rag"
-cloudfront_comment = "CloudFront-for-graph-rag"
-oai_comment = f"OAI for {vector_index_name}"
+vector_index_name = project_name
+neptune_graph_name = project_name
+cloudfront_comment = f"CloudFront-for-{project_name}"
+oai_comment = f"OAI for {project_name}"
 
 sts_client = boto3.client("sts", region_name=region)
 account_id = sts_client.get_caller_identity()["Account"]
 
-knowledge_base_name = vector_index_name
-knowledge_base_role_name = f"role-knowledge-base-for-{vector_index_name}-{region}"
-bucket_name = f"storage-for-rag-project-{account_id}-{region}"
+knowledge_base_name = project_name
+knowledge_base_role_name = f"role-knowledge-base-for-{project_name}-{region}"
+bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
@@ -500,7 +500,7 @@ def delete_agentcore_websearch_gateway(confirmed: bool = False) -> bool:
 
 
 def delete_secrets():
-    """Delete Secrets Manager secrets created by installer."""
+    """Delete legacy Secrets Manager secrets if they still exist."""
     logger.info("[4/6] Deleting secrets")
 
     secret_names = [

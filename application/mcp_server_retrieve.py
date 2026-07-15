@@ -15,12 +15,7 @@ logger = logging.getLogger("retrieve-server")
 
 try:
     mcp = FastMCP(
-        name = "mcp-retrieve",
-        instructions=(
-            "You are a helpful assistant. "
-            "You retrieve documents using Bedrock Knowledge Base GraphRAG "
-            "(Amazon Neptune Analytics)."
-        ),
+        name = "mcp-retrieve"
     )
     logger.info("MCP server initialized successfully")
 except Exception as e:

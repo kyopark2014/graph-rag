@@ -60,31 +60,23 @@ vector_index_name = project_name
 | `role-agent-for-{project_name}-{region}` | Bedrock Agent용 역할 |
 | `role-agentcore-gateway-websearch-for-{project_name}` | AgentCore Web Search Gateway용 역할 |
 
-### 3. Secrets Manager
-- `openweathermap-{project_name}`: Weather API 키
-- `tavilyapikey-{project_name}`: Tavily API 키
-- `notionapikey-{project_name}`: Notion API 키
-- `telegramapikey-{project_name}`: Telegram Bot API 키
-- `discordapikey-{project_name}`: Discord Bot API 키
-- `slackapikey-{project_name}`: Slack API 키
-
-### 4. Neptune Analytics (GraphRAG)
+### 3. Neptune Analytics (GraphRAG)
 - **그래프**: `rag-project` (32 m-NCU, 벡터 차원 1024)
 - **용도**: Bedrock Knowledge Bases GraphRAG 벡터+그래프 스토어
 
-### 5. Bedrock Knowledge Base
+### 4. Bedrock Knowledge Base
 - **스토리지**: Amazon Neptune Analytics (`NEPTUNE_ANALYTICS`)
 - **임베딩 모델**: Amazon Titan Embed Text v2 (1024차원, FLOAT32)
 - **그래프 구성 모델**: Claude Haiku 4.5 (CHUNK_ENTITY_EXTRACTION)
 - **청킹**: Fixed size (300 토큰, overlap 20%)
 
-### 6. CloudFront (S3 오리진)
+### 5. CloudFront (S3 오리진)
 - **Comment**: `CloudFront-for-rag-project`
 - **오리진**: S3 버킷 (`docs/`, `artifacts/` 등 정적 컨텐츠 공유용)
 - **OAI**: S3 버킷 정책으로 CloudFront 접근 허용
 - **sharing_url**: `https://{cloudfront_domain}` → `application/config.json`에 저장
 
-### 7. AgentCore Web Search Gateway
+### 6. AgentCore Web Search Gateway
 - **Gateway**: `gateway-websearch` (`us-east-1`)
 - **Target**: 관리형 `web-search` 커넥터
 
@@ -136,19 +128,17 @@ streamlit run application/app.py
 ## 배포 순서
 
 ```
-[1/6] Secrets Manager 시크릿 생성
+[1/5] S3 버킷 생성
        ↓
-[2/6] S3 버킷 생성
-       ↓
-[3/6] IAM 역할 생성
+[2/5] IAM 역할 생성
        • Knowledge Base / Agent 역할
        • AgentCore Web Search Gateway 역할 및 Gateway 생성
        ↓
-[4/6] Neptune Analytics 그래프 생성 (벡터 인덱스 1024차원)
+[3/5] Neptune Analytics 그래프 생성 (벡터 인덱스 1024차원)
        ↓
-[5/6] Bedrock Knowledge Base(GraphRAG) 생성
+[4/5] Bedrock Knowledge Base(GraphRAG) 생성
        ↓
-[6/6] CloudFront 배포 생성 (S3 오리진)
+[5/5] CloudFront 배포 생성 (S3 오리진)
        ↓
 application/config.json 업데이트 (sharing_url, neptune_graph_* 포함)
 ```

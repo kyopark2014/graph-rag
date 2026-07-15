@@ -815,8 +815,8 @@ async def call_model(state: State, config):
             )
             messages = trimmed
 
-        if chat.uses_adaptive_thinking():
-            messages = chat.sanitize_messages_for_bedrock(messages)
+        # Strip thinking/reasoning blocks — Bedrock rejects LangChain's "reasoning" tag
+        messages = chat.sanitize_messages_for_bedrock(messages)
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", system),
@@ -839,8 +839,7 @@ async def call_model(state: State, config):
             response = merged if isinstance(merged, AIMessage) else AIMessage(
                 content=getattr(merged, "content", str(merged))
             )
-        if chat.uses_adaptive_thinking():
-            response = chat.sanitize_messages_for_bedrock([response])[0]
+        response = chat.sanitize_messages_for_bedrock([response])[0]
         logger.info(f"response of call_model: {response}")
 
     except Exception:
@@ -905,9 +904,7 @@ async def plan_node(state: State, config):
         ])
         chain = prompt | chatModel
 
-        plan_messages = state["messages"]
-        if chat.uses_adaptive_thinking():
-            plan_messages = chat.sanitize_messages_for_bedrock(plan_messages)
+        plan_messages = chat.sanitize_messages_for_bedrock(state["messages"])
         result = await chain.ainvoke({"messages": plan_messages})
 
         plan = result.content[result.content.find('<plan>')+6:result.content.find('</plan>')]
@@ -1169,10 +1166,14 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
     result = ""
     tool_used = False  # Track if tool was used
     tool_name = toolUseId = ""
+    chat.tool_input_list.clear()
     async for stream in app.astream(inputs, config, stream_mode="messages"):
         if isinstance(stream[0], AIMessageChunk):
             message = stream[0]    
-            input = {}        
+            input = {}
+            # Bedrock puts the same JSON delta in content.partial_json AND
+            # tool_call_chunks.args — only accumulate from one path per chunk.
+            handled_tool_input = False
             if isinstance(message.content, list):
                 for content_item in message.content:
                     if isinstance(content_item, dict):
@@ -1207,6 +1208,7 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                                     chat.tool_input_list[toolUseId] = ""                                
                                 chat.tool_input_list[toolUseId] += partial_json
                                 input = chat.tool_input_list[toolUseId]
+                                handled_tool_input = True
 
                                 if queue:
                                     queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
@@ -1228,10 +1230,11 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                                     arguments = str(arguments)
                                 chat.tool_input_list[toolUseId] = arguments
                                 input = chat.tool_input_list[toolUseId]
+                                handled_tool_input = True
                                 if queue:
                                     queue.tool_update(toolUseId, f"Tool: {tool_name}, Input: {input}")
                         
-            # OpenAI streaming may deliver tool calls via tool_call_chunks
+            # OpenAI / providers that only stream via tool_call_chunks
             tool_call_chunks = getattr(message, "tool_call_chunks", None) or []
             for tc in tool_call_chunks:
                 tid = tc.get("id") or toolUseId
@@ -1242,6 +1245,8 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                     logger.info(f"tool_name: {tool_name}, toolUseId: {toolUseId}")
                     if queue:
                         queue.register_tool(toolUseId, tool_name)
+                if handled_tool_input:
+                    continue
                 args_delta = tc.get("args")
                 if args_delta is not None and toolUseId:
                     if toolUseId not in chat.tool_input_list:
@@ -1256,8 +1261,12 @@ async def run_langgraph_agent(query: str, mcp_servers: list, skill_list: list, h
                             f"Tool: {tool_name}, Input: {chat.tool_input_list[toolUseId]}",
                         )
 
-            # Fallback: completed tool_calls on a chunk (no tool_use/function_call content)
-            if not tool_call_chunks and getattr(message, "tool_calls", None):
+            # Fallback: completed tool_calls on a chunk (no streaming args path)
+            if (
+                not handled_tool_input
+                and not tool_call_chunks
+                and getattr(message, "tool_calls", None)
+            ):
                 for tc in message.tool_calls:
                     tid = tc.get("id", "")
                     tname = tc.get("name", "")
