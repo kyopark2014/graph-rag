@@ -691,6 +691,65 @@ Human(Q2) → AI(A2) → Human(Q3) → AI(tool_calls) → ToolMessage → AI(A3)
 - trim은 LLM 컨텍스트 윈도우 관리용이며, 저장된 history를 삭제하지 않습니다.
 - 로그에서 `trimmed messages from X to Y (max_turns=5)`로 trim 여부를 확인할 수 있습니다.
 
+
+### 그래프 조회
+
+- KB 생성 시 **그래프 구축용 파운데이션 모델**과 **임베딩 모델**을 지정하면, Bedrock이 S3 문서에서 엔티티·관계를 자동으로 추출해 **Neptune Analytics 그래프**에 저장합니다.
+- 검색 시 ①벡터 검색 → ②관련 그래프 노드/청크 확장 → ③그래프 순회로 컨텍스트를 풍부하게 만드는 방식입니다.
+- 그래프 스키마를 직접 정의하거나 openCypher/Gremlin으로 그래프를 만드는 건 아니고, **조회는 가능**합니다.
+
+#### 그래프 직접 조회하는 방법
+
+Neptune Analytics의 **`ExecuteQuery` API**(openCypher 지원)로 조회하면 됩니다.
+
+**AWS CLI 예시:**
+```bash
+aws neptune-graph execute-query \
+  --graph-identifier <g-xxxxxxxx> \
+  --region <region> \
+  --query-string "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 100" \
+  --language open_cypher \
+  /dev/stdout
+```
+
+**boto3(Python) 예시:**
+```python
+import boto3
+client = boto3.client("neptune-graph", region_name="us-east-1")
+resp = client.execute_query(
+    graphIdentifier="g-xxxxxxxx",
+    queryString="MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 100",
+    language="OPEN_CYPHER",
+)
+```
+
+필요 권한(IAM): `neptune-graph:ReadDataViaQuery` (읍기용), 그래프 식별자(`graph-identifier`)는 KB 콘솔의 Vector store 설정에서 확인 가능합니다.
+
+참고: `RetrievalFilter`의 `listContains`, list형 `stringContains` 필터는 Neptune Analytics 그래프에서 미지원이라는 제약이 있습니다.
+
+#### 시각화
+
+조회 결과(노드 a, 관계 r, 노드 b)를 `networkx` + `matplotlib`으로 그리면 관계도를 그림으로 볼 수 있습니다. 실행 가능한 스크립트를 만들어 드렸어요 (graph-id, region만 넣으면 바로 조회+시각화):
+
+- 스크립트: [graphrag_query_example.py](./graphrag_query_example.py)
+  ```bash
+  python graphrag_query_example.py --graph-id g-xxxxxxxx --region us-east-1
+  ```
+
+- 예시 결과 이미지(모의 데이터로 만든 관계도 예시, 실제 조회 전 형태 참고용): [graphrag_example_visualization.png](./graphrag_example_visualization.png)
+
+### Graph RAG 제약사항
+
+| 항목 | 내용 |
+|---|---|
+| 데이터소스 | GraphRAG는 **S3만 지원** |
+| 그래프 커스터마이징 | 그래프 빌드 방식 자체는 커스터마이징 불가(모델만 선택) |
+| 오토스케일링 | Neptune Analytics graph는 오토스케일링 미지원 |
+| KB 삭제 시 | KB 먼저 삭제 → 그래프는 별도로 삭제해야 함(자동 삭제 안 됨, 안 지우면 과금 계속됨) |
+| 계층적 청킹 사용 시 | GraphRAG는 child chunk만 검색(parent로 치환 안 됨) |
+| 시각화 툴 | Neptune 콘솔의 오픈소스 **Graph Explorer**로도 그래프 탐색·시각화 가능(자연어 질의는 미지원, 순수 탐색용) |
+
+
 ## 실행 결과
 
 아래와 같이 SKILL 생성을 요청합니다.
